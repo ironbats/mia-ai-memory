@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Search: {{ query }} — ai-memory{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100">
+    {% if query != "" %}
+    Search: <span class="text-blue-600 dark:text-blue-400">{{ query }}</span>
+    {% else %}
+    Search
+    {% endif %}
+  </h1>
+</div>
+
+<form action="search" method="get" class="mb-8 flex gap-2">
+  <input
+    name="q"
+    type="search"
+    value="{{ query }}"
+    placeholder="Search pages…"
+    class="flex-1 max-w-md rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+  >
+  <button type="submit" class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+    Search
+  </button>
+</form>
+
+{% if query == "" %}
+<p class="text-sm text-slate-500 dark:text-slate-400">Enter a search term above.</p>
+{% else if hits.is_empty() %}
+<p class="text-sm text-slate-500 dark:text-slate-400">No results for <strong>{{ query }}</strong>.</p>
+{% else %}
+<p class="text-sm text-slate-500 dark:text-slate-400 mb-4">{{ hit_count }} result{% if hit_count != 1 %}s{% endif %}</p>
+<ul class="divide-y divide-slate-100 dark:divide-slate-800">
+  {% for hit in hits %}
+  <li class="py-4">
+    <a href="{{ hit.href }}"
+       class="text-base font-medium text-blue-700 dark:text-blue-400 hover:underline block mb-1">
+      {{ hit.title }}
+    </a>
+    <div class="text-sm text-slate-600 dark:text-slate-400 mb-1">{{ hit.snippet|safe }}</div>
+    <div class="text-xs text-slate-400 dark:text-slate-500">{{ hit.workspace }}/{{ hit.project }} · {{ hit.path }}</div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

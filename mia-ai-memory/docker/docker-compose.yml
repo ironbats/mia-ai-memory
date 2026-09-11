@@ -1,0 +1,85 @@
+services:
+  ai-memory:
+    image: ai-memory:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ai-memory
+    restart: unless-stopped
+    user: "1000:1000"
+    volumes:
+      - ai-memory-data:/data
+    ports:
+      - "127.0.0.1:${AI_MEMORY_PORT:-49374}:49374"
+    env_file:
+      - .env
+    environment:
+      RUST_LOG: ${RUST_LOG:-ai_memory=info,ai_memory_store=info,ai_memory_wiki=info,ai_memory_mcp=info,tracing_appender=warn}
+      AI_MEMORY_ALLOWED_HOSTS: ${AI_MEMORY_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,host.docker.internal,ai-memory}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ai-memory", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  cognitive-db:
+    image: postgres:17-alpine
+    container_name: ai-memory-cognitive-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${COGNITIVE_DB_NAME:-ai_memory}
+      POSTGRES_USER: ${COGNITIVE_DB_USER:-ai_memory}
+      POSTGRES_PASSWORD: ${COGNITIVE_DB_PASSWORD:-ai_memory}
+    volumes:
+      - cognitive-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${COGNITIVE_DB_USER:-ai_memory} -d ${COGNITIVE_DB_NAME:-ai_memory}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  cognitive-api:
+    build:
+      context: ..
+      dockerfile: services/cognitive-api/Dockerfile
+    container_name: ai-memory-cognitive-api
+    restart: unless-stopped
+    depends_on:
+      ai-memory:
+        condition: service_healthy
+      cognitive-db:
+        condition: service_healthy
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      DATABASE_URL: postgres://${COGNITIVE_DB_USER:-ai_memory}:${COGNITIVE_DB_PASSWORD:-ai_memory}@cognitive-db:5432/${COGNITIVE_DB_NAME:-ai_memory}
+      AI_MEMORY_CORE_URL: http://ai-memory:49374/api/v1
+      AI_MEMORY_API_TOKEN: ${AI_MEMORY_AUTH_TOKEN:-}
+      COGNITIVE_ADMIN_TOKEN: ${COGNITIVE_ADMIN_TOKEN:-}
+      COGNITIVE_SYNC_ENABLED: ${COGNITIVE_SYNC_ENABLED:-true}
+      COGNITIVE_SYNC_INTERVAL_MS: ${COGNITIVE_SYNC_INTERVAL_MS:-30000}
+      COGNITIVE_SYNC_PAGE_CONCURRENCY: ${COGNITIVE_SYNC_PAGE_CONCURRENCY:-8}
+      COGNITIVE_BRAIN_NODE_LIMIT: ${COGNITIVE_BRAIN_NODE_LIMIT:-320}
+      COGNITIVE_CREDENTIALS_MASTER_KEY_BASE64: ${COGNITIVE_CREDENTIALS_MASTER_KEY_BASE64:-}
+      COGNITIVE_EMBEDDING_BASE_URL: ${COGNITIVE_EMBEDDING_BASE_URL:-}
+      COGNITIVE_EMBEDDING_API_KEY: ${COGNITIVE_EMBEDDING_API_KEY:-}
+      COGNITIVE_EMBEDDING_PROVIDER: ${COGNITIVE_EMBEDDING_PROVIDER:-}
+      COGNITIVE_EMBEDDING_MODEL: ${COGNITIVE_EMBEDDING_MODEL:-}
+      COGNITIVE_EMBEDDING_DIM: ${COGNITIVE_EMBEDDING_DIM:-0}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    ports:
+      - "127.0.0.1:${COGNITIVE_API_PORT:-8787}:8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  ai-memory-data:
+    name: ai-memory-data
+  cognitive-postgres-data:
+    name: ai-memory-cognitive-postgres

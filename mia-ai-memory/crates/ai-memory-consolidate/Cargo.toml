@@ -1,0 +1,38 @@
+[package]
+name = "ai-memory-consolidate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Karpathy-style ingest / query / lint consolidation pipeline."
+# One integration-test binary instead of one per file. Each binary
+# statically links the whole dep graph and gets scanned by macOS on
+# first run.
+
+[dependencies]
+ai-memory-core.workspace = true
+ai-memory-store.workspace = true
+ai-memory-wiki.workspace = true
+ai-memory-llm.workspace = true
+git2.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+ai-memory-test-support.workspace = true
+async-trait.workspace = true
+tempfile.workspace = true
+rusqlite.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

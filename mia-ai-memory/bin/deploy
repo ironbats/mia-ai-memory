@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Build + push + deploy ai-memory to a homelab Docker host.
+#
+# Reads SERVER, DEPLOY_DIR, and IMAGE from bin/deploy.env (which is
+# .gitignored — see bin/deploy.env.example for the template). The
+# script itself is host-agnostic; everything operator-specific lives
+# in that sourced file.
+#
+# Initial setup (one-time, before the first deploy):
+#
+#   1. Copy bin/deploy.env.example to bin/deploy.env and fill in
+#      your homelab specifics.
+#   2. Copy docker/docker-compose.prod.yml.example to
+#      docker/docker-compose.prod.yml; adjust ports / volumes if
+#      needed.
+#   3. Copy docker/.env.production.example to docker/.env.production
+#      and fill in API keys (LLM + embeddings).
+#   4. SSH into the homelab and create the deploy dir:
+#        ssh "$SERVER" "sudo mkdir -p $DEPLOY_DIR && \
+#                       sudo chown $(whoami): $DEPLOY_DIR"
+#   5. scp the compose + env files up there:
+#        scp docker/docker-compose.prod.yml "$SERVER:$DEPLOY_DIR/docker-compose.yml"
+#        scp docker/.env.production "$SERVER:$DEPLOY_DIR/.env.production"
+#   6. Now `bin/deploy` works.
+#
+# See docs/deploy.md for the full setup walkthrough.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="$SCRIPT_DIR/deploy.env"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+    cat >&2 <<EOF
+==> bin/deploy.env not found.
+
+This file holds your homelab-specific values (server, deploy dir,
+image tag) and is gitignored. Copy the template and fill it in:
+
+    cp bin/deploy.env.example bin/deploy.env
+    \$EDITOR bin/deploy.env
+
+Then re-run bin/deploy. See docs/deploy.md for details.
+EOF
+    exit 64
+fi
+
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+
+: "${SERVER:?SERVER not set in bin/deploy.env}"
+: "${DEPLOY_DIR:?DEPLOY_DIR not set in bin/deploy.env}"
+: "${IMAGE:?IMAGE not set in bin/deploy.env}"
+
+SSH_OPTS=("-F" "/dev/null" "-o" "StrictHostKeyChecking=accept-new")
+CONTAINER_NAME="${CONTAINER_NAME:-ai-memory}"
+
+cd "$REPO_ROOT"
+
+# Fail closed if $IMAGE already carries a multi-architecture manifest.
+#
+# `docker build` below produces an image for THIS machine's architecture
+# only. Pushing that to a tag whose current manifest is a multi-arch list
+# replaces the list, and every host on the other architecture starts
+# failing with `exec format error` on the next pull.
+#
+# That is not hypothetical: it happened to `:latest` on 2026-08-18 (issue
+# #427). `bin/release` + the release workflow publish amd64 and arm64 and
+# join them into a manifest; a homelab deploy from an x86 workstation then
+# silently flattened it to amd64-only. Release tags are published by CI —
+# a deploy has no business overwriting one.
+if docker manifest inspect "$IMAGE" >/dev/null 2>&1 &&
+   docker manifest inspect "$IMAGE" 2>/dev/null | grep -q '"manifests"'; then
+    cat >&2 <<EOF
+==> REFUSING to overwrite a multi-architecture tag.
+
+    $IMAGE currently resolves to a multi-arch manifest (published by
+    the release workflow). This script builds for $(uname -m) only, so
+    pushing would drop every other architecture and break those hosts
+    with "exec format error".
+
+    Deploy a private tag instead — set IMAGE in bin/deploy.env to
+    something like:
+
+        IMAGE="akitaonrails/ai-memory:homelab"
+
+    and point docker-compose.yml on the server at that tag. Release
+    tags (:latest, :X.Y.Z) are published by CI only.
+
+    To deploy the released image without rebuilding, skip this script
+    and just pull it on the server:
+
+        ssh \$SERVER "cd \$DEPLOY_DIR && docker compose pull && docker compose up -d"
+EOF
+    exit 65
+fi
+
+echo "==> Building Docker image: $IMAGE"
+docker build -t "$IMAGE" -f docker/Dockerfile .
+
+echo "==> Pushing image to registry..."
+docker push "$IMAGE"
+
+echo "==> Deploying to $SERVER:$DEPLOY_DIR"
+# `docker compose pull` fetches the new tag; `down` stops the old
+# container; `up -d` starts the new one with the new tag. We don't
+# `docker compose build` on the server because the binary travels
+# baked into the image.
+ssh "${SSH_OPTS[@]}" "$SERVER" "cd $DEPLOY_DIR && \
+    docker compose pull && \
+    docker compose down && \
+    docker compose up -d"
+
+echo "==> Waiting for container to come up..."
+sleep 3
+ssh "${SSH_OPTS[@]}" "$SERVER" \
+    "docker inspect --format='{{.State.Status}} ({{.State.Health.Status}})' $CONTAINER_NAME"
+
+echo "==> Deploy complete."
+echo
+echo "    Container: $CONTAINER_NAME on $SERVER"
+echo "    Probe MCP: curl ${SERVER#*@}:49374/mcp"

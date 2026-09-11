@@ -1,0 +1,55 @@
+name: nix
+
+# Builds the flake so the Nix packaging cannot rot unnoticed.
+#
+# ai-memory does not otherwise test on Nix, so without this job `flake.nix`
+# is source nobody executes: it can break through a dependency bump, a
+# toolchain change, or a new build script and stay green because no other
+# job touches it.
+#
+# Deliberately NOT run on every pull request — a full release build under
+# Nix costs far more wall-clock than the rest of the matrix combined, and
+# most PRs cannot affect it. It runs when an input to the Nix build
+# actually changes, on a weekly schedule to catch upstream drift, and on
+# demand.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'flake.nix'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/nix.yml'
+  pull_request:
+    paths:
+      - 'flake.nix'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/nix.yml'
+  schedule:
+    # Mondays 05:17 UTC. Off the hour so it does not pile onto the
+    # top-of-hour scheduling spike.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: nix build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # `nix flake check` would also evaluate every output; the build is the
+      # claim worth verifying, and it is the expensive half anyway.
+      - run: nix build --print-build-logs
+      # The binary is what the flake promises. Run it, so a package that
+      # builds but cannot execute still fails.
+      - run: ./result/bin/ai-memory --version

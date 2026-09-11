@@ -1,0 +1,16 @@
+{
+  "name": "ai-memory-cognitive-api",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/db.js && node --check src/core-client.js && node --check src/credential-vault.js && node --check src/embedding-client.js && node --check src/integration-repository.js && node --check src/integration-service.js && node --check src/repository.js && node --check src/sync-service.js && node --check src/attachment-service.js && node --check src/chat-repository.js && node --check src/llm-executor.js && node --check src/chat-service.js && node --check src/server.js"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
+  }
+}

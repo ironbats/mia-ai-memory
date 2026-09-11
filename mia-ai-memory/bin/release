@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Cut a release of ai-memory.
+#
+# Usage: bin/release <version>
+#
+# Where <version> is a semver string without the leading "v", e.g. "0.2.0".
+#
+# What this script does:
+#   1. Validates the version string.
+#   2. Runs fmt / clippy / test gates.
+#   3. Runs cargo-deny and cargo-audit (warn-only — a known advisory should
+#      not block a release; the operator reviews the output).
+#   4. Updates [workspace.package] version in Cargo.toml.
+#   5. Moves CHANGELOG.md [Unreleased] entries to a new [X.Y.Z] section
+#      dated today.
+#   6. Commits both files as "release: vX.Y.Z".
+#   7. Creates an annotated git tag vX.Y.Z whose message is the changelog
+#      entry for this version.
+#   8. Prints next-step instructions: push the commit + tag, then deploy.
+#
+# The script intentionally does NOT push to git remote or to Docker Hub.
+# Releases are operator-driven: review the tag locally before pushing.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── argument validation ────────────────────────────────────────────────────
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: bin/release <version>  (e.g. bin/release 0.2.0)" >&2
+    exit 64
+fi
+
+VERSION="$1"
+
+# Basic semver: X.Y.Z with optional pre-release / build metadata.
+# We allow 0.1.0-rc.1 etc. but reject obviously wrong strings early.
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.+_-]*)?$ ]]; then
+    echo "ERROR: '$VERSION' does not look like a semver string (expected X.Y.Z)" >&2
+    exit 1
+fi
+
+TAG="v${VERSION}"
+TODAY="$(date -u +%Y-%m-%d)"
+CARGO_TOML="$REPO_ROOT/Cargo.toml"
+CHANGELOG="$REPO_ROOT/CHANGELOG.md"
+
+echo "==> Releasing ${TAG} (dated ${TODAY})"
+
+# ── quality gates ──────────────────────────────────────────────────────────
+
+cd "$REPO_ROOT"
+
+echo "==> cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "==> git diff --check"
+git diff --check
+
+echo "==> cargo clippy"
+cargo clippy --workspace --all-targets -- -D warnings
+
+echo "==> cargo test --workspace --all-targets"
+cargo test --workspace --all-targets
+
+echo "==> cargo deny check (warn-only)"
+if command -v cargo-deny &>/dev/null; then
+    cargo deny check || echo "  [warn] cargo deny reported issues — review before pushing"
+else
+    echo "  [warn] cargo-deny not installed; skipping (install with: cargo install cargo-deny)"
+fi
+
+echo "==> cargo audit (warn-only)"
+if command -v cargo-audit &>/dev/null; then
+    cargo audit || echo "  [warn] cargo audit reported advisories — review before pushing"
+else
+    echo "  [warn] cargo-audit not installed; skipping (install with: cargo install cargo-audit)"
+fi
+
+# ── update Cargo.toml version ──────────────────────────────────────────────
+
+echo "==> Updating Cargo.toml workspace version to ${VERSION}"
+
+python3 - <<PYEOF
+import re, pathlib, sys
+
+path = pathlib.Path("$CARGO_TOML")
+text = path.read_text()
+
+# 1. Bump [workspace.package] version = "..."
+new_text = re.sub(
+    r'(\[workspace\.package\].*?^version\s*=\s*")[^"]+(")',
+    r'\g<1>$VERSION\g<2>',
+    text,
+    count=1,
+    flags=re.MULTILINE | re.DOTALL,
+)
+if new_text == text:
+    sys.exit("ERROR: could not find [workspace.package] version in Cargo.toml")
+
+# 2. Bump version constraints in [workspace.dependencies] for the intra-crate
+#    path deps (ai-memory-core, ai-memory-store, etc.).  These always use the
+#    same version as the workspace package itself.
+new_text = re.sub(
+    r'(ai-memory-\w+\s*=\s*\{[^}]*version\s*=\s*")[^"]+(")',
+    r'\g<1>$VERSION\g<2>',
+    new_text,
+    flags=re.MULTILINE,
+)
+
+path.write_text(new_text)
+print(f"  version -> $VERSION")
+PYEOF
+
+# Sync Cargo.lock to the bumped workspace-member versions. Without this the
+# lockfile keeps the old version and the very next `cargo build` dirties the
+# tree right after the release commit. `--workspace` touches only our crates;
+# external deps are left pinned. `--offline` first so a release doesn't depend
+# on network, falling back to a networked update if the cache is incomplete.
+echo "==> Syncing Cargo.lock"
+cargo update --workspace --offline 2>/dev/null || cargo update --workspace
+
+# ── update CHANGELOG.md ────────────────────────────────────────────────────
+
+echo "==> Updating CHANGELOG.md"
+
+python3 - <<PYEOF
+import pathlib, re, sys
+
+path = pathlib.Path("$CHANGELOG")
+text = path.read_text()
+
+unreleased_pattern = re.compile(
+    r'(## \[Unreleased\]\n)(.*?)(\n## \[)',
+    re.DOTALL,
+)
+m = unreleased_pattern.search(text)
+if not m:
+    print("  [warn] no [Unreleased] section with content found; CHANGELOG not updated", file=sys.stderr)
+    sys.exit(0)
+
+unreleased_body = m.group(2)
+
+# Build new [Unreleased] (empty) + new version section.
+new_version_header = f"## [$VERSION] - $TODAY"
+new_block = (
+    "## [Unreleased]\n\n"
+    + new_version_header + "\n"
+    + unreleased_body
+)
+
+new_text = unreleased_pattern.sub(lambda _: new_block + "\n## [", text, count=1)
+
+# Update the reference links at the bottom.
+# Replace the Unreleased compare link to point from this version to HEAD.
+new_text = re.sub(
+    r'^\[Unreleased\]:.*$',
+    lambda _: (
+        "[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/$TAG...HEAD\n"
+        "[$VERSION]: https://github.com/akitaonrails/ai-memory/releases/tag/$TAG"
+    ),
+    new_text,
+    flags=re.MULTILINE,
+)
+
+path.write_text(new_text)
+print("  moved [Unreleased] entries to [$VERSION] - $TODAY")
+PYEOF
+
+# ── commit + tag ───────────────────────────────────────────────────────────
+
+echo "==> Committing release files"
+git add "$CARGO_TOML" "$CHANGELOG" Cargo.lock
+git commit -m "release: ${TAG}"
+
+echo "==> Extracting changelog entry for tag message"
+CHANGELOG_ENTRY="$(python3 - <<PYEOF
+import pathlib, re
+
+path = pathlib.Path("$CHANGELOG")
+text = path.read_text()
+
+# Extract the new version section body.
+m = re.search(
+    r'## \[$VERSION\] - $TODAY\n(.*?)(?=\n## \[|\Z)',
+    text,
+    re.DOTALL,
+)
+print(m.group(1).strip() if m else "Release $TAG")
+PYEOF
+)"
+
+echo "==> Creating annotated tag ${TAG}"
+git tag -a "${TAG}" -m "$(printf '%s\n\n%s' "Release ${TAG}" "${CHANGELOG_ENTRY}")"
+
+# ── next steps ─────────────────────────────────────────────────────────────
+
+cat <<EOF
+
+Release ${TAG} is ready locally. To publish:
+
+  git push && git push origin ${TAG}
+
+Then deploy the Docker image:
+
+  ./bin/deploy
+
+EOF

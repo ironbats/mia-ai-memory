@@ -1,0 +1,40 @@
+{
+  "note": "Cross-language expected capture-policy vectors. All sentinel strings are test-only.",
+  "normalization": [
+    {"pattern":"secret/**","candidate":"secret","cwd":"/repo","match":true},
+    {"pattern":"secret/**","candidate":"a/../secret/file","cwd":"/repo","match":true},
+    {"pattern":"/**","candidate":"/","cwd":"/repo","match":true},
+    {"pattern":"C:/**","candidate":"C:/","cwd":"C:/","match":true},
+    {"pattern":"\\\\server\\share\\**","candidate":"//SERVER/SHARE","cwd":"C:/","match":true},
+    {"pattern":"C:\\Secret\\**","candidate":"c:/SECRET","cwd":"C:/","match":true},
+    {"pattern":"\\\\server\\share\\x","candidate":"//SERVER/SHARE/X","cwd":"C:/","match":true},
+    {"pattern":"unicode/?.txt","candidate":"unicode/é.txt","cwd":"/repo","match":true},
+    {"pattern":"foo..bar","candidate":"foo..bar","cwd":"/repo","match":true}
+  ],
+  "decisions": [
+    {"agent":"claude-code","payload":{"tool_name":"Edit","tool_input":{"file_path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"codex","payload":{"tool_name":"Edit","tool_input":{"file_path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"cursor","payload":{"tool_name":"Edit","tool_input":{"file_path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"gemini-cli","payload":{"tool_name":"Edit","tool_input":{"file_path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"devin","payload":{"tool_name":"Edit","tool_input":{"file_path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"kiro-cli","payload":{"tool_name":"fs_write","tool_input":{"command":"create","path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"kiro-cli","payload":{"tool_name":"read","tool_input":{"operations":[{"mode":"Line","path":"public"},{"mode":"Line","path":"secret/a"}]}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":2},
+    {"agent":"kiro-cli","payload":{"tool_name":"read","tool_input":{"operations":[]}},"disposition":"metadata-only","tool_family":"file","extraction_state":"missing-or-malformed","path_count":0},
+    {"agent":"kiro-cli","payload":{"tool_name":"execute_bash","tool_input":{"command":"cat secret/a"}},"disposition":"keep","tool_family":"non-file","extraction_state":"extracted","path_count":0},
+    {"agent":"grok","payload":{"toolName":"Edit","toolInput":{"filePath":"secret/a"},"callID":"safe-1"},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"zero","payload":{"toolName":"Edit","input":{"path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"antigravity-cli","payload":{"toolCall":{"name":"Edit","args":{"path":"secret/a"}}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"open-code","payload":{"tool":"Edit","args":{"path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"omp","payload":{"tool":"Edit","args":{"path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"pi","payload":{"tool":"Edit","args":{"path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"openclaw","payload":{"tool":"Edit","args":{"path":"secret/a"}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":1},
+    {"agent":"codex","payload":{"tool_name":"Edit","tool_input":null},"disposition":"metadata-only","tool_family":"file","extraction_state":"missing-or-malformed","path_count":0},
+    {"agent":"codex","payload":{"tool_name":"Edit","tool_input":{"path":"   "}},"disposition":"metadata-only","tool_family":"file","extraction_state":"missing-or-malformed","path_count":0},
+    {"agent":"codex","payload":{"tool_name":"MultiEdit","tool_input":{"edits":[{"path":"public"},{"path":"secret/a"}]}},"disposition":"drop","tool_family":"file","extraction_state":"extracted","path_count":2},
+    {"agent":"codex","payload":{"tool_name":"Search","tool_input":{}},"disposition":"drop","tool_family":"search-list","extraction_state":"not-applicable","path_count":0},
+    {"agent":"codex","payload":{"tool_name":"Bash","tool_input":{"command":"secret/a"}},"disposition":"keep","tool_family":"non-file","extraction_state":"extracted","path_count":0},
+    {"agent":"codex","payload":{"tool_name":"FutureTool","tool_input":{"path":"secret/a"}},"disposition":"keep","tool_family":"unknown","extraction_state":"extracted","path_count":0},
+    {"agent":"codex","payload":{"tool_name":"Edit","tool_input":{"nested":{"path":"secret/a"}}},"disposition":"metadata-only","tool_family":"file","extraction_state":"missing-or-malformed","path_count":0}
+  ],
+  "protocol": {"accept":{"version":1,"disposition":"drop","policy_state":"active","tool_family":"file","path_count":1,"extraction_state":"extracted"},"reject":{"version":1,"disposition":"drop","policy_state":"active","tool_family":"file","path_count":1,"extraction_state":"extracted","paths":["SENTINEL"]}}
+}

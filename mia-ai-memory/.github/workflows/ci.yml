@@ -1,0 +1,247 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  # Manual full run (macOS legs included) — dispatch on the
+  # release-candidate SHA right before a release.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS catches stat / SELinux / case-sensitivity assumptions
+        # that wouldn't show up on a Linux-only matrix. It costs most of
+        # the wall clock, so during iteration only Linux runs; the macOS
+        # leg joins on a `full-ci` PR label or a manual dispatch, and is
+        # MANDATORY right before a release (see AGENTS.md).
+        os: >-
+          ${{ (github.event_name == 'workflow_dispatch' ||
+               contains(github.event.pull_request.labels.*.name, 'full-ci'))
+              && fromJSON('["ubuntu-latest", "macos-latest"]')
+              || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      # On macOS, rustls-tls-native-roots otherwise enumerates Keychain every
+      # time a test process builds a reqwest client. Scope the PEM-bundle
+      # shortcut to macOS CI instead of setting a repo-wide Cargo env var that
+      # breaks other local platforms.
+      - name: Use macOS PEM bundle
+        if: matrix.os == 'macos-latest'
+        run: echo "SSL_CERT_FILE=/etc/ssl/cert.pem" >> "$GITHUB_ENV"
+      # Linux regenerates the web stylesheet from source, so a stale vendored
+      # static/tailwind.css fails here instead of shipping.
+      - name: Regenerate the Tailwind bundle
+        if: matrix.os == 'ubuntu-latest'
+        run: echo "TAILWIND_BUILD=1" >> "$GITHUB_ENV"
+      - run: cargo test --workspace --all-targets
+      - name: Vendored tailwind.css is current
+        if: matrix.os == 'ubuntu-latest'
+        run: git diff --exit-code -- crates/ai-memory-web/static/tailwind.css
+
+  # Native Windows coverage lives in `.github/workflows/windows.yml`: it
+  # runs nightly, on demand, and on any pull request carrying the `windows`
+  # label. It was ~1000s here against ~250s for the
+  # same tests on Linux, which meant every pull request waited roughly
+  # seventeen minutes when every gating job below finishes in about eight —
+  # and it was `continue-on-error`, so those extra minutes gated nothing.
+  # Add the `windows` label to a pull request that touches path handling,
+  # file locking, or git plumbing.
+
+  # The companion importer is deliberately outside the root workspace
+  # (its own [workspace] in companions/ai-memory-importer/Cargo.toml), so
+  # none of the jobs above compile it. Gate it here with the same
+  # fmt/clippy/test trio docs/companion-crates.md prescribes, or a
+  # toolchain bump / convention change rots it silently.
+  companions:
+    name: companions (ai-memory-importer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: companions/ai-memory-importer
+      - run: cargo fmt --check --manifest-path companions/ai-memory-importer/Cargo.toml
+      - run: cargo clippy --manifest-path companions/ai-memory-importer/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path companions/ai-memory-importer/Cargo.toml
+
+  # Build the release binary on its own so a release-only failure
+  # (LTO crash, codegen issue, dead-code-with-debug-assertions) doesn't
+  # ship to Docker Hub silently.
+  release-build:
+    name: cargo build --release (${{ matrix.artifact }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep Linux on Debian bookworm so the prebuilt binary matches the
+        # Docker runtime image. macOS entries mirror the release assets;
+        # they run only on `full-ci` / dispatch (mandatory pre-release),
+        # like the macOS test leg above.
+        include: >-
+          ${{ (github.event_name == 'workflow_dispatch' ||
+               contains(github.event.pull_request.labels.*.name, 'full-ci'))
+              && fromJSON('[{"artifact": "linux-x86_64", "runner": "ubuntu-22.04"},
+                            {"artifact": "macos-aarch64", "runner": "macos-15"},
+                            {"artifact": "macos-x86_64", "runner": "macos-15-intel"}]')
+              || fromJSON('[{"artifact": "linux-x86_64", "runner": "ubuntu-22.04"}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - run: cargo build --release --bin ai-memory
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-ai-memory-${{ matrix.artifact }}
+          path: target/release/ai-memory
+
+  # `cargo install --path` deliberately resolves without the workspace lockfile.
+  # Keep that user-facing path visible alongside the normal lock-aware gates so
+  # an allowed upstream dependency update cannot break source installation.
+  source-install:
+    name: cargo install --path (fresh resolution)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.95
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Install with a fresh dependency resolution
+        run: cargo install --path crates/ai-memory-cli --debug --root target/source-install
+      - name: Smoke test installed binary
+        run: target/source-install/bin/ai-memory --version
+
+  native-packaging:
+    name: native packaging assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/check-native-packaging.sh
+      - run: tests/wrapper_upgrade.sh
+
+  # `bin/release` copies `## [Unreleased]` into the new version section
+  # verbatim, so a repeated `### ` heading there ships release notes with the
+  # entries split across two identical headings. Valid Markdown, invisible in
+  # review, and it has happened repeatedly.
+  changelog:
+    name: changelog sections
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `check-changelog-frozen.sh` diffs against the merge base, so it
+          # needs history rather than a shallow clone.
+          fetch-depth: 0
+      - run: scripts/check-changelog-sections.sh
+      - name: released sections stay frozen
+        run: scripts/check-changelog-frozen.sh "origin/${{ github.base_ref || github.event.repository.default_branch }}"
+
+  # End-to-end docker smoke: packages the release-build binary and confirms
+  # the image runs. Catches Dockerfile drift (missing COPY, bad ENTRYPOINT)
+  # before it lands in production without recompiling Rust in Docker.
+  docker-smoke:
+    name: docker image smoke
+    runs-on: ubuntu-latest
+    needs: release-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-ai-memory-linux-x86_64
+          path: dist/docker/ai-memory-linux-x86_64
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: build image (local tag only)
+        run: docker build --target runtime-prebuilt-amd64 -f docker/Dockerfile -t ai-memory:ci .
+      - name: --version smoke
+        run: docker run --rm ai-memory:ci --version
+      - name: bundled hooks present
+        run: docker run --rm --entrypoint sh ai-memory:ci -c "ls /usr/local/share/ai-memory/hooks/"
+      - name: --help lists the v0.3 subcommands
+        run: |
+          out=$(docker run --rm ai-memory:ci --help)
+          for sub in bootstrap install-mcp install-hooks setup-agent generate-auth-token; do
+              echo "$out" | grep -q "$sub" || { echo "missing subcommand: $sub"; exit 1; }
+          done
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          log-level: warn
+          command: check
+          arguments: --all-features
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - run: cargo install cargo-audit --locked
+      - run: >
+          cargo audit
+          --ignore RUSTSEC-2025-0141
+          --ignore RUSTSEC-2024-0320
+          --ignore RUSTSEC-2026-0194
+          --ignore RUSTSEC-2026-0195
+
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The action scans the pushed/PR commit range. Full history is
+          # checked separately by secret-scan.yml on a schedule or on demand.
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Exit nonzero if any secret is found; config lives at the
+          # repo root so the same rules apply locally if you also
+          # install gitleaks.
+          GITLEAKS_CONFIG: .gitleaks.toml
