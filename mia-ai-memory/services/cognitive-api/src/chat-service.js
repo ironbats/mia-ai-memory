@@ -7,6 +7,7 @@ import { createQueryEmbedding } from "./embedding-client.js"
 import { integrationService } from "./integration-service.js"
 import { executeAgent } from "./llm-executor.js"
 import { repository } from "./repository.js"
+import { requestCognitiveSync } from "./sync-service.js"
 
 const failure = (message, status = 400) => Object.assign(new Error(message), { status, expose: true })
 
@@ -329,6 +330,7 @@ export const chatService = {
       assistantMessage = await chatRepository.updateMessage(assistantId, {
         metadata: { memoryCapture: "captured", coreSessionId, capture }
       })
+      requestCognitiveSync({ workspace: conversation.workspace, project: conversation.project })
     } catch (error) {
       assistantMessage = await chatRepository.updateMessage(assistantId, {
         metadata: { memoryCapture: "degraded", memoryCaptureError: String(error?.message || error).slice(0, 500) }

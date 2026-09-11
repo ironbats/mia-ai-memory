@@ -78,9 +78,22 @@ export const repository = {
         await client.query(
           `INSERT INTO cognitive_memory_versions (
              workspace, project, path, title, kind, tier, source_updated_at, source_session_id, source_agent, provenance, frontmatter, body_markdown
-           ) VALUES ($1,$2,$3,$4,$5,$6,$9,$10,$11,$12::jsonb,$13::jsonb,$14)
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12)
            ON CONFLICT (workspace, project, path, source_updated_at) DO NOTHING`,
-          values.slice(0, 14)
+          [
+            memory.workspace,
+            memory.project,
+            memory.path,
+            memory.title,
+            memory.kind,
+            memory.tier,
+            memory.updatedAt,
+            memory.sourceSessionId,
+            memory.sourceAgent,
+            json(memory.provenance || {}),
+            json(memory.frontmatter || {}),
+            memory.bodyMarkdown || ""
+          ]
         )
       }
       await client.query(
@@ -309,7 +322,7 @@ export const repository = {
   },
 
   async summary(workspace, project) {
-    const [{ rows: memoryRows }, { rows: sessionRows }, { rows: handoffRows }, { rows: healthRows }, sync] = await Promise.all([
+    const [{ rows: memoryRows }, { rows: sessionRows }, { rows: handoffRows }, { rows: healthRows }, { rows: scopeRows }, { rows: chatRows }, sync] = await Promise.all([
       pool.query(
         `SELECT COUNT(*)::bigint AS total,
                 COUNT(*) FILTER (WHERE stale)::bigint AS stale,
@@ -323,16 +336,48 @@ export const repository = {
       pool.query(`SELECT COUNT(*)::bigint AS total, COALESCE(SUM(observation_count), 0)::bigint AS observations FROM cognitive_sessions WHERE workspace = $1 AND project = $2`, [workspace, project]),
       pool.query(`SELECT COUNT(*)::bigint AS total, COUNT(*) FILTER (WHERE state = 'open')::bigint AS open FROM cognitive_handoffs WHERE workspace = $1 AND project = $2`, [workspace, project]),
       pool.query(`SELECT * FROM cognitive_health_snapshots WHERE workspace = $1 AND project = $2 ORDER BY captured_at DESC LIMIT 1`, [workspace, project]),
+      pool.query(`SELECT page_count, last_updated, synced_at FROM cognitive_scopes WHERE workspace = $1 AND project = $2`, [workspace, project]),
+      pool.query(
+        `SELECT COUNT(DISTINCT c.id)::bigint AS conversations,
+                COUNT(*) FILTER (WHERE m.role = 'assistant' AND m.status = 'completed')::bigint AS completed_turns,
+                COUNT(*) FILTER (WHERE m.role = 'assistant' AND m.status = 'completed' AND m.metadata->>'memoryCapture' = 'captured')::bigint AS captured_turns,
+                COUNT(*) FILTER (WHERE m.role = 'assistant' AND m.status = 'completed' AND m.metadata->>'memoryCapture' = 'degraded')::bigint AS degraded_turns
+         FROM cognitive_chat_conversations c
+         LEFT JOIN cognitive_chat_messages m ON m.conversation_id = c.id
+         WHERE c.workspace = $1 AND c.project = $2 AND c.archived = FALSE`,
+        [workspace, project]
+      ),
       this.latestSync(workspace, project)
     ])
-    const memories = memoryRows[0] || {}
+    const memoryCounts = Object.fromEntries(Object.entries(memoryRows[0] || {}).map(([key, value]) => [key, Number(value || 0)]))
+    const scope = scopeRows[0] || null
+    const indexedMemories = Number(memoryCounts.total || 0)
+    const coreMemories = Number(scope?.page_count || 0)
+    const expectedMemories = Math.max(indexedMemories, coreMemories)
+    const chat = chatRows[0] || {}
     return {
       workspace,
       project,
-      memories: Object.fromEntries(Object.entries(memories).map(([key, value]) => [key, Number(value || 0)])),
+      memories: {
+        ...memoryCounts,
+        total: expectedMemories,
+        indexed: indexedMemories,
+        core_total: coreMemories
+      },
       sessions: { total: Number(sessionRows[0]?.total || 0), observations: Number(sessionRows[0]?.observations || 0) },
       handoffs: { total: Number(handoffRows[0]?.total || 0), open: Number(handoffRows[0]?.open || 0) },
+      chat: {
+        conversations: Number(chat.conversations || 0),
+        completed_turns: Number(chat.completed_turns || 0),
+        captured_turns: Number(chat.captured_turns || 0),
+        degraded_turns: Number(chat.degraded_turns || 0)
+      },
       health: healthRows[0] || null,
+      observability: {
+        read_model_complete: indexedMemories >= coreMemories,
+        scope_synced_at: scope?.synced_at || null,
+        core_last_updated: scope?.last_updated || null
+      },
       sync
     }
   },

@@ -22,6 +22,21 @@ const tabs = [
 
 const number = value => new Intl.NumberFormat("pt-BR").format(Number(value || 0))
 const percent = (value, total) => total ? `${Math.round(value / total * 100)}%` : "0%"
+const resultValue = result => result?.status === "fulfilled" ? result.value : null
+const resultFailure = (label, result) => result?.status === "rejected" ? `${label}: ${result.reason?.message || "falha ao carregar"}` : ""
+
+const dataStatusMessage = (summaryData, failures) => {
+  const parts = failures.filter(Boolean)
+  if (summaryData?.sync?.status === "failed") {
+    parts.unshift(`Sincronização cognitiva falhou: ${summaryData.sync.error || "consulte os logs do Cognitive API"}`)
+  }
+  if (summaryData?.observability?.read_model_complete === false) {
+    const indexed = Number(summaryData?.memories?.indexed || 0)
+    const total = Number(summaryData?.memories?.total || 0)
+    parts.push(`Read model em atualização: ${indexed}/${total} memórias indexadas`)
+  }
+  return parts.join(" · ")
+}
 
 export default function App() {
   const [scopes, setScopes] = useState([])
@@ -37,7 +52,8 @@ export default function App() {
   const [tab, setTab] = useState("brain")
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
-  const [error, setError] = useState("")
+  const [dataError, setDataError] = useState("")
+  const [actionError, setActionError] = useState("")
   const [memory, setMemory] = useState(null)
   const [memoryLoading, setMemoryLoading] = useState(false)
 
@@ -54,46 +70,82 @@ export default function App() {
   const loadScopeData = useCallback(async current => {
     if (!current) return
     setLoading(true)
-    setError("")
-    try {
-      const [summaryData, brainData, healthData, agentsData, handoffData, activityData, memoryData, optimizationData] = await Promise.all([
-        api.summary(current),
-        api.brain(current),
-        api.health(current),
-        api.agents(current),
-        api.handoffs(current, 80),
-        api.activity(current, 80),
-        api.memories(current, 300),
-        api.optimization(current, 200)
-      ])
-      setSummary(summaryData)
-      setBrain(brainData)
-      setHealth(healthData)
-      setAgents(agentsData)
-      setHandoffs(handoffData.handoffs || [])
-      setActivity(activityData.events || [])
-      setMemories(memoryData.memories || [])
-      setOptimizations(optimizationData.recommendations || [])
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
+    setActionError("")
+    const results = await Promise.allSettled([
+      api.summary(current),
+      api.brain(current),
+      api.health(current),
+      api.agents(current),
+      api.handoffs(current, 80),
+      api.activity(current, 80),
+      api.memories(current, 300),
+      api.optimization(current, 200)
+    ])
+
+    const summaryData = resultValue(results[0])
+    const brainData = resultValue(results[1])
+    const healthData = resultValue(results[2])
+    const agentsData = resultValue(results[3])
+    const handoffData = resultValue(results[4])
+    const activityData = resultValue(results[5])
+    const memoryData = resultValue(results[6])
+    const optimizationData = resultValue(results[7])
+
+    if (summaryData) setSummary(summaryData)
+    if (brainData) setBrain(brainData)
+    if (healthData) setHealth(healthData)
+    if (agentsData) setAgents(agentsData)
+    if (handoffData) setHandoffs(handoffData.handoffs || [])
+    if (activityData) setActivity(activityData.events || [])
+    if (memoryData) setMemories(memoryData.memories || [])
+    if (optimizationData) setOptimizations(optimizationData.recommendations || [])
+
+    setDataError(dataStatusMessage(summaryData, [
+      resultFailure("Resumo", results[0]),
+      resultFailure("Rede neural", results[1]),
+      resultFailure("Health", results[2]),
+      resultFailure("Agentes", results[3]),
+      resultFailure("Handoffs", results[4]),
+      resultFailure("Atividade", results[5]),
+      resultFailure("Memórias", results[6]),
+      resultFailure("Otimizações", results[7])
+    ]))
+    setLoading(false)
   }, [])
 
-  const refreshActivity = useCallback(async current => {
+  const refreshTelemetry = useCallback(async current => {
     if (!current) return
-    try {
-      const data = await api.activity(current, 80)
-      setActivity(data.events || [])
-    } catch {
-      return
-    }
+    const results = await Promise.allSettled([
+      api.summary(current),
+      api.brain(current),
+      api.health(current),
+      api.agents(current),
+      api.activity(current, 80)
+    ])
+    const summaryData = resultValue(results[0])
+    const brainData = resultValue(results[1])
+    const healthData = resultValue(results[2])
+    const agentsData = resultValue(results[3])
+    const activityData = resultValue(results[4])
+
+    if (summaryData) setSummary(summaryData)
+    if (brainData) setBrain(brainData)
+    if (healthData) setHealth(healthData)
+    if (agentsData) setAgents(agentsData)
+    if (activityData) setActivity(activityData.events || [])
+
+    setDataError(dataStatusMessage(summaryData, [
+      resultFailure("Resumo", results[0]),
+      resultFailure("Rede neural", results[1]),
+      resultFailure("Health", results[2]),
+      resultFailure("Agentes", results[3]),
+      resultFailure("Atividade", results[4])
+    ]))
   }, [])
 
   useEffect(() => {
     loadScopes().catch(err => {
-      setError(err.message)
+      setDataError(err.message)
       setLoading(false)
     })
   }, [loadScopes])
@@ -110,33 +162,44 @@ export default function App() {
 
   useEffect(() => {
     if (!scope) return
-    const timer = window.setInterval(() => refreshActivity(scope), 10000)
-    return () => window.clearInterval(timer)
-  }, [scopeKey, refreshActivity])
+    let stopped = false
+    let timer = null
+    const tick = async () => {
+      await refreshTelemetry(scope)
+      if (!stopped) timer = window.setTimeout(tick, 10000)
+    }
+    timer = window.setTimeout(tick, 10000)
+    return () => {
+      stopped = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [scopeKey, refreshTelemetry])
 
   const sync = async () => {
     if (!scope) return
     setSyncing(true)
-    setError("")
+    setActionError("")
     try {
       await api.sync(scope)
     } catch (err) {
       if (err.status !== 403) {
-        setError(err.message)
+        setActionError(err.message)
         setSyncing(false)
+        await refreshTelemetry(scope)
         return
       }
       const token = window.prompt("COGNITIVE_ADMIN_TOKEN") || ""
       if (!token) {
-        setError("Sincronização protegida: informe o COGNITIVE_ADMIN_TOKEN.")
+        setActionError("Sincronização protegida: informe o COGNITIVE_ADMIN_TOKEN.")
         setSyncing(false)
         return
       }
       try {
         await api.sync(scope, token)
       } catch (retryError) {
-        setError(retryError.message)
+        setActionError(retryError.message)
         setSyncing(false)
+        await refreshTelemetry(scope)
         return
       }
     }
@@ -152,10 +215,11 @@ export default function App() {
     if ((node.type && node.type !== "memory") || !node.path || !scope) return
     setMemoryLoading(true)
     setMemory({ title: node.label || node.title })
+    setActionError("")
     try {
       setMemory(await api.memory(scope, node.path))
     } catch (err) {
-      setError(err.message)
+      setActionError(err.message)
       setMemory(null)
     } finally {
       setMemoryLoading(false)
@@ -164,14 +228,27 @@ export default function App() {
 
   const healthScore = summary?.health?.score ?? 0
   const totalMemories = Number(summary?.memories?.total || 0)
+  const indexedMemories = Number(summary?.memories?.indexed ?? summary?.memories?.total ?? 0)
   const provenance = Number(summary?.memories?.with_provenance || 0)
+  const readModelComplete = summary?.observability?.read_model_complete !== false
+  const provenanceBase = indexedMemories || totalMemories
   const lastSync = summary?.sync?.finished_at || summary?.sync?.started_at
+  const visibleError = actionError || dataError
 
   const brainCounts = useMemo(() => {
     const counts = { agent: 0, session: 0, memory: 0, entity: 0, external: 0 }
     for (const node of brain.nodes || []) counts[node.type] = (counts[node.type] || 0) + 1
     return counts
   }, [brain])
+
+  const memoryDetail = readModelComplete
+    ? `${number(brainCounts.memory)} no grafo atual`
+    : `${number(indexedMemories)}/${number(totalMemories)} indexadas no read model`
+  const provenanceDetail = indexedMemories
+    ? `${number(provenance)} de ${number(indexedMemories)} indexadas ligadas a sessões`
+    : readModelComplete ? "nenhuma memória indexada" : "aguardando indexação das memórias"
+  const sessionsDetail = `${number(summary?.sessions?.observations)} observações · ${number(summary?.chat?.captured_turns)} capturas web`
+  const syncDetail = summary?.sync?.status === "failed" ? "failed · diagnóstico acima" : summary?.sync?.status || "sem sync"
 
   return (
     <div className="app-shell">
@@ -197,13 +274,12 @@ export default function App() {
         <section className="hero-row">
           <div>
             <span className="eyebrow">Agent cognitive observability</span>
-            <h1>Memória visível.<br /><em>Decisões rastreáveis.</em></h1>
-            <p>Veja onde o conhecimento está, qual agente o produziu, como ele evolui, o que está degradando e por que cada contexto foi recuperado.</p>
+            <h1>AI Memory.<br /><em>Multi-Agent.</em></h1>
           </div>
           <div className="health-orb"><div className="orb-core"><strong>{healthScore}</strong><span>health</span></div><i className="orbit one" /><i className="orbit two" /><i className="orbit three" /></div>
         </section>
 
-        {error ? <div className="error-banner">{error}</div> : null}
+        {visibleError ? <div className="error-banner">{visibleError}</div> : null}
         <nav className="tabs">{tabs.map(([id, label]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{label}</button>)}</nav>
 
         {tab === "integrations" ? <IntegrationHub scope={scope} /> : !scope ? (
@@ -211,12 +287,12 @@ export default function App() {
         ) : (
           <>
             <section className="metrics-grid">
-              <MetricCard label="Memórias" value={number(totalMemories)} detail={`${number(brainCounts.memory)} no grafo atual`} />
-              <MetricCard label="Provenance" value={percent(provenance, totalMemories)} detail={`${number(provenance)} ligadas a sessões`} tone={provenance < totalMemories ? "warning" : "good"} />
-              <MetricCard label="Sessões" value={number(summary?.sessions?.total)} detail={`${number(summary?.sessions?.observations)} observações`} />
+              <MetricCard label="Memórias" value={number(totalMemories)} detail={memoryDetail} tone={readModelComplete ? "default" : "warning"} />
+              <MetricCard label="Provenance" value={!readModelComplete && !indexedMemories ? "—" : percent(provenance, provenanceBase)} detail={provenanceDetail} tone={!readModelComplete || provenance < provenanceBase ? "warning" : "good"} />
+              <MetricCard label="Sessões" value={number(summary?.sessions?.total)} detail={sessionsDetail} />
               <MetricCard label="Contradições" value={number(summary?.memories?.contradictions)} detail={`${number(summary?.memories?.orphans)} órfãs`} tone={Number(summary?.memories?.contradictions) ? "danger" : "good"} />
               <MetricCard label="Handoffs" value={number(summary?.handoffs?.total)} detail={`${number(summary?.handoffs?.open)} abertos`} />
-              <MetricCard label="Último sync" value={lastSync ? new Date(lastSync).toLocaleTimeString("pt-BR") : "—"} detail={summary?.sync?.status || "sem sync"} />
+              <MetricCard label="Último sync" value={lastSync ? new Date(lastSync).toLocaleTimeString("pt-BR") : "—"} detail={syncDetail} tone={summary?.sync?.status === "failed" ? "danger" : "default"} />
             </section>
 
             {loading ? <div className="loading-panel"><div className="pulse-ring" />Consolidando visão cognitiva…</div> : null}
