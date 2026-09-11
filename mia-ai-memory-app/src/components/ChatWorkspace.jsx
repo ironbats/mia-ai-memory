@@ -66,6 +66,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   const selectedModels = useMemo(() => models.filter(item => item.agentId === agentId), [models, agentId])
   const lastAssistantMessage = useMemo(() => [...messages].reverse().find(item => item.role === "assistant") || null, [messages])
   const continuityDetail = lastAssistantMessage ? memoryLabel(lastAssistantMessage) : `${agents.length} agentes disponíveis · memória independente do executor`
+  const gitLabel = workspace?.gitRepository ? workspace.gitBranch || workspace.gitHeadShort || "Git" : ""
   const scopeKey = scope ? `${scope.workspace}/${scope.project}` : ""
   const stages = useMemo(() => workspace?.isReady ? [
     `Mapeando ${workspace.rootName}`,
@@ -402,7 +403,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
         <div className="chat-status-stack">
           <div className="chat-continuity">
             <div className="chat-continuity-route"><span className="route-agent">{(selectedAgent?.name || "AI").slice(0, 2).toUpperCase()}</span><i /><span className="route-memory">M</span>{workspace?.isReady ? <><i /><span className="route-code">&lt;/&gt;</span></> : null}</div>
-            <div><strong>{workspace?.isReady ? `Memória + código · ${workspace.rootName}` : "Memória compartilhada ativa"}</strong><span>{workspace?.isReady ? `${workspace.filePaths.length} arquivos locais · ${workspace.contextPaths.length} fixados · ${continuityDetail}` : continuityDetail}</span></div>
+            <div><strong>{workspace?.isReady ? `Memória + código · ${workspace.rootName}${gitLabel ? ` · ${gitLabel}` : ""}` : "Memória compartilhada ativa"}</strong><span>{workspace?.isReady ? `${workspace.filePaths.length} arquivos locais · ${workspace.contextPaths.length} fixados · ${continuityDetail}` : continuityDetail}</span></div>
             <b>{selectedAgent?.name || "selecione um agente"}</b>
           </div>
           {codeNotice ? <div className="chat-code-notice"><span>✓</span>{codeNotice}<button onClick={onOpenIDE}>Ver na IDE</button></div> : null}
@@ -434,7 +435,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
                   {message.attachments?.length ? <div className="chat-message-files">{message.attachments.map(attachment => <button key={attachment.id} onClick={() => downloadAttachment(attachment)}><span>ZIP</span><strong>{attachment.fileName}</strong><small>{formatSize(attachment.sizeBytes)}</small><i>↓</i></button>)}</div> : null}
                   {plan ? (
                     <div className={`chat-code-plan ${status}`}>
-                      <div className="chat-code-plan-head"><span>&lt;/&gt;</span><div><strong>{plan.summary || "Alterações de código prontas"}</strong><small>{plan.operations?.length || 0} operação(ões) · {plan.workspace?.rootName || "workspace local"}</small></div><i>{status === "applied" ? "APLICADO" : status === "conflict" ? "CONFLITO" : status === "failed" ? "FALHOU" : "PRONTO"}</i></div>
+                      <div className="chat-code-plan-head"><span>&lt;/&gt;</span><div><strong>{plan.summary || "Alterações de código prontas"}</strong><small>{plan.operations?.length || 0} operação(ões) · {plan.workspace?.rootName || "workspace local"}{plan.workspace?.branch ? ` · ${plan.workspace.branch}` : ""}</small></div><i>{status === "applied" ? "APLICADO" : status === "conflict" ? "CONFLITO" : status === "failed" ? "FALHOU" : "PRONTO"}</i></div>
                       <div className="chat-code-files">{(plan.operations || []).slice(0, 8).map((operation, index) => <span key={`${operation.path}:${index}`}><i>{operation.type === "delete" ? "−" : operation.expectedExists === false ? "+" : "~"}</i><strong>{operation.path}</strong></span>)}{plan.operations?.length > 8 ? <small>+ {plan.operations.length - 8} arquivos</small> : null}</div>
                       {message.metadata?.codeChangeResult?.error ? <div className="chat-code-plan-error">{message.metadata.codeChangeResult.error}</div> : null}
                       <div className="chat-code-plan-actions"><button onClick={onOpenIDE}>Abrir IDE</button>{status !== "applied" ? <button className="primary" onClick={() => applyCodePlan(message)} disabled={applyingId === message.id}>{applyingId === message.id ? "Aplicando…" : "Aplicar alterações"}</button> : <strong>✓ Gravado no projeto local</strong>}</div>
@@ -463,7 +464,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
         </div>
 
         <div className={`chat-composer${dragging ? " dragging" : ""}`} onDragEnter={event => { event.preventDefault(); setDragging(true) }} onDragOver={event => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files) }}>
-          {workspace?.isReady ? <div className="chat-local-context"><span>&lt;/&gt;</span><strong>{workspace.rootName}</strong><small>{workspace.activePath || "projeto conectado"}</small><button onClick={onOpenIDE}>IDE</button></div> : null}
+          {workspace?.isReady ? <div className="chat-local-context"><span>&lt;/&gt;</span><strong>{workspace.rootName}</strong>{gitLabel ? <i className="chat-local-branch">⑂ {gitLabel}</i> : null}<small>{workspace.activePath || "projeto conectado"}</small><button onClick={onOpenIDE}>IDE</button></div> : null}
           {files.length ? <div className="chat-file-queue">{files.map((file, index) => <span key={`${file.name}:${file.size}:${file.lastModified}`}><i>ZIP</i><strong>{file.name}</strong><small>{formatSize(file.size)}</small><button onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></span>)}</div> : null}
           <div className="chat-compose-row">
             <input ref={fileInputRef} hidden type="file" accept=".zip,application/zip,application/x-zip-compressed" multiple onChange={event => { addFiles(event.target.files); event.target.value = "" }} />

@@ -242,7 +242,7 @@ export const chatService = {
       metadata: {
         selectedAgentId: agent.id,
         selectedModel: model,
-        ...(workspaceContext ? { workspace: { rootName: workspaceContext.rootName, activeFile: workspaceContext.activeFile, contextFileCount: workspaceContext.stats.contextFileCount } } : {})
+        ...(workspaceContext ? { workspace: { rootName: workspaceContext.rootName, activeFile: workspaceContext.activeFile, branch: workspaceContext.git?.branch || null, head: workspaceContext.git?.head || null, contextFileCount: workspaceContext.stats.contextFileCount } } : {})
       }
     })
     if (attachmentIds.length) {
@@ -277,7 +277,8 @@ export const chatService = {
         activeFile: workspaceContext.activeFile,
         fileCount: workspaceContext.stats.fileCount,
         contextFileCount: workspaceContext.stats.contextFileCount,
-        contextBytes: workspaceContext.stats.contextBytes
+        contextBytes: workspaceContext.stats.contextBytes,
+        git: workspaceContext.git ? { branch: workspaceContext.git.branch, head: workspaceContext.git.head, detached: workspaceContext.git.detached, worktree: workspaceContext.git.worktree } : null
       } : null,
       embeddingError: durableMemory.embeddingError,
       retrievalError: durableMemory.retrievalError
@@ -383,6 +384,7 @@ export const chatService = {
     const result = {
       status,
       workspace: body.workspace ? String(body.workspace).slice(0, 180) : null,
+      branch: body.branch ? String(body.branch).slice(0, 240) : null,
       files,
       conflicts,
       error: body.error ? String(body.error).slice(0, 1000) : null,
@@ -410,7 +412,7 @@ export const chatService = {
           agent: message.agentName || "ai-memory-web-ide",
           sessionId: coreSessionId,
           model: message.model || "local-workspace",
-          userPrompt: `Local code change applied to ${result.workspace || message.metadata.codeChangePlan.workspace?.rootName || "workspace"}`,
+          userPrompt: `Local code change applied to ${result.workspace || message.metadata.codeChangePlan.workspace?.rootName || "workspace"}${result.branch ? ` on branch ${result.branch}` : ""}`,
           assistantResponse: `${summary}${appliedFiles ? `\n\nApplied files:\n${appliedFiles}` : ""}`
         })
         updated = await chatRepository.updateMessage(messageId, { metadata: { codeChangeResult: { ...result, memoryCapture: "captured", coreSessionId, capture } } })

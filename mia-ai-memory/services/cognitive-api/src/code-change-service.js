@@ -84,9 +84,20 @@ export const normalizeWorkspaceContext = input => {
     activeFile = null
   }
 
+  const rawGit = input.git && typeof input.git === "object" ? input.git : null
+  const rawBranch = limitedText(rawGit?.branch || "", 240, "workspace git branch").trim()
+  const git = rawGit?.repository === true ? {
+    repository: true,
+    branch: /^[A-Za-z0-9._/-]{1,240}$/.test(rawBranch) ? rawBranch : null,
+    head: /^[a-f0-9]{40,64}$/i.test(String(rawGit.head || "")) ? String(rawGit.head).toLowerCase() : null,
+    detached: rawGit.detached === true,
+    worktree: rawGit.worktree === true
+  } : null
+
   return {
     rootName,
     activeFile,
+    git,
     manifest,
     manifestTruncated: input.manifestTruncated === true,
     files,
@@ -107,6 +118,8 @@ export const workspacePromptSection = workspace => {
   return [
     `LOCAL WORKSPACE ${workspace.rootName}`,
     `Active file: ${workspace.activeFile || "none"}`,
+    `Git repository: ${workspace.git ? "yes" : "no"}`,
+    ...(workspace.git ? [`Git branch: ${workspace.git.branch || (workspace.git.detached ? "detached HEAD" : "unknown")}`, `Git HEAD: ${workspace.git.head || "unknown"}`] : []),
     `Project files: ${workspace.stats.fileCount}${workspace.manifestTruncated ? "+" : ""}`,
     "PROJECT MANIFEST",
     manifest,
@@ -191,6 +204,8 @@ export const extractCodeChangePlan = (content, workspace) => {
       workspace: {
         rootName: workspace.rootName,
         activeFile: workspace.activeFile,
+        branch: workspace.git?.branch || null,
+        head: workspace.git?.head || null,
         fileCount: workspace.stats.fileCount,
         contextFileCount: workspace.stats.contextFileCount
       },

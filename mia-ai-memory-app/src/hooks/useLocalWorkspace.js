@@ -76,6 +76,49 @@ const parentPath = path => {
   return values.join("/")
 }
 
+const readHandleFile = async (directoryHandle, filePath) => {
+  let current = directoryHandle
+  const segments = normalizePath(filePath).split("/").filter(Boolean)
+  for (const segment of segments.slice(0, -1)) current = await current.getDirectoryHandle(segment)
+  const handle = await current.getFileHandle(segments[segments.length - 1])
+  return (await handle.getFile()).text()
+}
+
+const detectGit = async rootHandle => {
+  if (!rootHandle) return { repository: false, branch: "", head: "", detached: false, worktree: false }
+  try {
+    const gitDirectory = await rootHandle.getDirectoryHandle(".git")
+    const headText = (await readHandleFile(gitDirectory, "HEAD")).trim()
+    if (headText.startsWith("ref:")) {
+      const ref = headText.slice(4).trim()
+      const branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref
+      let head = ""
+      try {
+        head = (await readHandleFile(gitDirectory, ref)).trim()
+      } catch {
+        try {
+          const packed = await readHandleFile(gitDirectory, "packed-refs")
+          const match = packed.split(/\r?\n/).map(line => line.trim()).find(line => line && !line.startsWith("#") && !line.startsWith("^") && line.endsWith(` ${ref}`))
+          head = match ? match.split(/\s+/)[0] : ""
+        } catch {
+        }
+      }
+      return { repository: true, branch, head, detached: false, worktree: false }
+    }
+    return { repository: true, branch: "", head: /^[a-f0-9]{40,64}$/i.test(headText) ? headText : "", detached: true, worktree: false }
+  } catch (directoryError) {
+    if (directoryError?.name !== "TypeMismatchError" && directoryError?.name !== "NotFoundError") return { repository: false, branch: "", head: "", detached: false, worktree: false }
+  }
+  try {
+    const gitFile = await rootHandle.getFileHandle(".git")
+    const content = await (await gitFile.getFile()).text()
+    const worktree = /^gitdir:\s*/im.test(content)
+    return { repository: worktree, branch: "", head: "", detached: false, worktree }
+  } catch {
+    return { repository: false, branch: "", head: "", detached: false, worktree: false }
+  }
+}
+
 export default function useLocalWorkspace() {
   const supported = typeof window !== "undefined" && typeof window.showDirectoryPicker === "function"
   const [rootHandle, setRootHandle] = useState(null)
@@ -89,13 +132,46 @@ export default function useLocalWorkspace() {
   const [error, setError] = useState("")
   const [autoApply, setAutoApply] = useState(true)
   const [workspaceSession, setWorkspaceSession] = useState(0)
+  const [gitRepository, setGitRepository] = useState(false)
+  const [gitBranch, setGitBranch] = useState("")
+  const [gitHead, setGitHead] = useState("")
+  const [gitDetached, setGitDetached] = useState(false)
+  const [gitWorktree, setGitWorktree] = useState(false)
+  const [sessionChanges, setSessionChanges] = useState([])
   const fileHandlesRef = useRef(new Map())
   const directoryHandlesRef = useRef(new Map())
   const tabsRef = useRef([])
+  const baselineRef = useRef(new Map())
+  const sessionChangesRef = useRef([])
 
   useEffect(() => {
     tabsRef.current = tabs
   }, [tabs])
+
+  useEffect(() => {
+    sessionChangesRef.current = sessionChanges
+  }, [sessionChanges])
+
+  const trackChange = useCallback(({ path, before = "", beforeExists = true, after = "", afterExists = true, origin = "editor" }) => {
+    const normalized = normalizePath(path)
+    if (!normalized) return
+    if (!baselineRef.current.has(normalized)) baselineRef.current.set(normalized, { exists: beforeExists, content: String(before ?? "") })
+    const baseline = baselineRef.current.get(normalized)
+    const changed = baseline.exists !== afterExists || baseline.content !== String(after ?? "")
+    setSessionChanges(values => {
+      const remaining = values.filter(item => item.path !== normalized)
+      if (!changed) return remaining
+      return [...remaining, {
+        path: normalized,
+        before: baseline.content,
+        beforeExists: baseline.exists,
+        after: String(after ?? ""),
+        afterExists,
+        origin,
+        updatedAt: new Date().toISOString()
+      }].sort((a, b) => a.path.localeCompare(b.path))
+    })
+  }, [])
 
   const scan = useCallback(async (handle, resetWorkspace = false) => {
     if (!handle) return
@@ -129,6 +205,7 @@ export default function useLocalWorkspace() {
 
     try {
       const nextTree = await walk(handle)
+      const git = await detectGit(handle)
       fileHandlesRef.current = fileHandles
       directoryHandlesRef.current = directoryHandles
       const sortedPaths = paths.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
@@ -136,7 +213,15 @@ export default function useLocalWorkspace() {
       setFilePaths(sortedPaths)
       setRootHandle(handle)
       setRootName(handle.name || "workspace")
+      setGitRepository(git.repository)
+      setGitBranch(git.branch)
+      setGitHead(git.head)
+      setGitDetached(git.detached)
+      setGitWorktree(git.worktree)
       if (resetWorkspace) {
+        baselineRef.current = new Map()
+        sessionChangesRef.current = []
+        setSessionChanges([])
         tabsRef.current = []
         setTabs([])
         setActivePath("")
@@ -187,6 +272,28 @@ export default function useLocalWorkspace() {
     if (rootHandle) await scan(rootHandle)
   }, [rootHandle, scan])
 
+  useEffect(() => {
+    if (!rootHandle) return undefined
+    let disposed = false
+    const refreshGitState = async () => {
+      try {
+        const git = await detectGit(rootHandle)
+        if (disposed) return
+        setGitRepository(git.repository)
+        setGitBranch(git.branch)
+        setGitHead(git.head)
+        setGitDetached(git.detached)
+        setGitWorktree(git.worktree)
+      } catch {
+      }
+    }
+    const timer = window.setInterval(refreshGitState, 4000)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [rootHandle])
+
   const readPath = useCallback(async path => {
     const normalized = safeRelativePath(path)
     const handle = fileHandlesRef.current.get(normalized)
@@ -205,6 +312,7 @@ export default function useLocalWorkspace() {
       return current
     }
     const content = await readPath(normalized)
+    if (!baselineRef.current.has(normalized)) baselineRef.current.set(normalized, { exists: true, content })
     const tab = { path: normalized, name: basename(normalized), content, savedContent: content, dirty: false, language: languageFor(normalized) }
     setTabs(values => [...values, tab])
     setActivePath(normalized)
@@ -213,8 +321,12 @@ export default function useLocalWorkspace() {
 
   const updateContent = useCallback((path, content) => {
     const normalized = normalizePath(path)
+    const current = tabsRef.current.find(tab => tab.path === normalized)
+    const baseline = baselineRef.current.get(normalized) || { exists: true, content: current?.savedContent || "" }
+    if (!baselineRef.current.has(normalized)) baselineRef.current.set(normalized, baseline)
     setTabs(values => values.map(tab => tab.path === normalized ? { ...tab, content, dirty: content !== tab.savedContent } : tab))
-  }, [])
+    trackChange({ path: normalized, before: baseline.content, beforeExists: baseline.exists, after: content, afterExists: true, origin: "editor" })
+  }, [trackChange])
 
   const getDirectoryForPath = useCallback(async (path, create = false) => {
     if (!rootHandle) throw new Error("Selecione uma pasta de projeto primeiro.")
@@ -269,14 +381,17 @@ export default function useLocalWorkspace() {
   const closeTab = useCallback(path => {
     const normalized = normalizePath(path)
     const current = tabsRef.current.find(tab => tab.path === normalized)
-    if (current?.dirty && !window.confirm(`Descartar alterações não salvas em ${current.name}?`)) return
+    if (current?.dirty) {
+      const baseline = baselineRef.current.get(normalized) || { exists: true, content: current.savedContent || "" }
+      trackChange({ path: normalized, before: baseline.content, beforeExists: baseline.exists, after: current.savedContent || "", afterExists: true, origin: "editor" })
+    }
     setTabs(values => {
       const index = values.findIndex(tab => tab.path === normalized)
       const next = values.filter(tab => tab.path !== normalized)
       setActivePath(active => active === normalized ? (next[Math.max(0, index - 1)]?.path || next[0]?.path || "") : active)
       return next
     })
-  }, [])
+  }, [trackChange])
 
   const createFile = useCallback(async path => {
     const normalized = safeRelativePath(path)
@@ -288,10 +403,12 @@ export default function useLocalWorkspace() {
       if (lookupError?.name !== "NotFoundError") throw lookupError
     }
     if (exists) throw new Error(`O arquivo ${normalized} já existe.`)
+    baselineRef.current.set(normalized, { exists: false, content: "" })
     await writePath(normalized, "")
+    trackChange({ path: normalized, before: "", beforeExists: false, after: "", afterExists: true, origin: "create" })
     await scan(rootHandle)
     await openFile(normalized)
-  }, [getFileHandle, openFile, rootHandle, scan, writePath])
+  }, [getFileHandle, openFile, rootHandle, scan, trackChange, writePath])
 
   const toggleContext = useCallback(path => {
     const normalized = normalizePath(path)
@@ -342,12 +459,19 @@ export default function useLocalWorkspace() {
     return {
       rootName,
       activeFile: activePath || null,
+      git: {
+        repository: gitRepository,
+        branch: gitBranch || null,
+        head: gitHead || null,
+        detached: gitDetached,
+        worktree: gitWorktree
+      },
       manifest: filePaths.slice(0, MAX_TREE_FILES),
       manifestTruncated: filePaths.length >= MAX_TREE_FILES,
       files,
       stats: { fileCount: filePaths.length, contextFileCount: files.length, contextBytes: totalBytes }
     }
-  }, [activePath, contextPaths, filePaths, readPath, rootHandle, rootName, saveAll])
+  }, [activePath, contextPaths, filePaths, gitBranch, gitDetached, gitHead, gitRepository, gitWorktree, readPath, rootHandle, rootName, saveAll])
 
   const removePath = useCallback(async path => {
     const normalized = safeRelativePath(path)
@@ -371,6 +495,12 @@ export default function useLocalWorkspace() {
 
   const applyChangePlan = useCallback(async plan => {
     if (!rootHandle) throw new Error("Selecione a pasta do projeto antes de aplicar alterações.")
+    if (plan?.workspace?.branch && gitBranch && plan.workspace.branch !== gitBranch) {
+      const branchError = new Error(`Conflito de branch: o plano foi gerado em ${plan.workspace.branch}, mas o projeto está em ${gitBranch}. Atualize o contexto antes de aplicar.`)
+      branchError.code = "WORKSPACE_CONFLICT"
+      branchError.conflicts = [{ path: ".git/HEAD", expected: plan.workspace.branch, actual: gitBranch }]
+      throw branchError
+    }
     const operations = Array.isArray(plan?.operations) ? plan.operations : []
     if (!operations.length) throw new Error("O agente não retornou operações de código aplicáveis.")
     const preflight = []
@@ -426,6 +556,28 @@ export default function useLocalWorkspace() {
       throw new Error(`Falha ao aplicar alterações; rollback executado: ${applyError.message || applyError}`)
     }
 
+    for (const item of preflight) {
+      if (item.operation.type === "write") {
+        trackChange({
+          path: item.operation.path,
+          before: item.before.content,
+          beforeExists: item.before.exists,
+          after: item.operation.content,
+          afterExists: true,
+          origin: "agent"
+        })
+      } else if (item.operation.type === "delete") {
+        trackChange({
+          path: item.operation.path,
+          before: item.before.content,
+          beforeExists: item.before.exists,
+          after: "",
+          afterExists: false,
+          origin: "agent"
+        })
+      }
+    }
+
     await scan(rootHandle)
     const appliedPaths = new Set(applied.map(item => item.path))
     const nextTabs = []
@@ -440,8 +592,8 @@ export default function useLocalWorkspace() {
     }
     setTabs(nextTabs)
     setActivePath(current => nextTabs.some(tab => tab.path === current) ? current : nextTabs[0]?.path || "")
-    return { status: "applied", workspace: rootName, files: applied, appliedAt: new Date().toISOString() }
-  }, [readCurrentDisk, readPath, removePath, rootHandle, rootName, scan, writePath])
+    return { status: "applied", workspace: rootName, branch: gitBranch || null, files: applied, appliedAt: new Date().toISOString() }
+  }, [gitBranch, readCurrentDisk, readPath, removePath, rootHandle, rootName, scan, trackChange, writePath])
 
   const activeTab = useMemo(() => tabs.find(tab => tab.path === activePath) || null, [activePath, tabs])
   const dirtyCount = useMemo(() => tabs.filter(tab => tab.dirty).length, [tabs])
@@ -461,9 +613,17 @@ export default function useLocalWorkspace() {
     dirtyCount,
     autoApply,
     workspaceSession,
+    gitRepository,
+    gitBranch,
+    gitHead,
+    gitHeadShort: gitHead ? gitHead.slice(0, 8) : "",
+    gitDetached,
+    gitWorktree,
+    sessionChanges,
     setAutoApply,
     selectDirectory,
     refresh,
+    readPath,
     openFile,
     setActivePath,
     updateContent,
