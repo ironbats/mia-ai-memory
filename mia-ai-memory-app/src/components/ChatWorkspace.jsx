@@ -50,11 +50,13 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   const [sending, setSending] = useState(false)
   const [thinkingStage, setThinkingStage] = useState(0)
   const [pendingPrompt, setPendingPrompt] = useState("")
+  const [pendingFiles, setPendingFiles] = useState([])
   const [error, setError] = useState("")
   const [dragging, setDragging] = useState(false)
   const [applyingId, setApplyingId] = useState("")
   const [codeNotice, setCodeNotice] = useState("")
   const fileInputRef = useRef(null)
+  const composerRef = useRef(null)
   const threadEndRef = useRef(null)
 
   const agents = bootstrap.agents || []
@@ -108,8 +110,10 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
       setConversation(data.conversation)
       setMessages(data.messages || [])
       if (data.conversation.defaultAgentId && agents.some(item => item.id === data.conversation.defaultAgentId)) setAgentId(data.conversation.defaultAgentId)
+      return data
     } catch (err) {
       setError(err.message)
+      return null
     } finally {
       setLoading(false)
     }
@@ -122,6 +126,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     setMessages([])
     setDraft("")
     setFiles([])
+    setPendingFiles([])
     setError("")
     setCodeNotice("")
     if (scope) refreshBootstrap().catch(err => setError(err.message))
@@ -271,6 +276,11 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
       return
     }
 
+    const submittedAt = Date.now()
+    const outgoingFiles = [...files]
+    setDraft("")
+    setFiles([])
+    setPendingFiles(outgoingFiles)
     setSending(true)
     setError("")
     setCodeNotice("")
@@ -280,23 +290,29 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
       currentConversation = currentConversation || await createConversation()
       if (!currentConversation) throw new Error("Não foi possível criar a conversa.")
       const attachmentIds = []
-      for (const file of files) {
+      for (const file of outgoingFiles) {
         const result = await api.uploadChatAttachment(currentConversation.id, file)
         attachmentIds.push(result.attachment.id)
       }
       const workspaceContext = workspace?.isReady ? await workspace.buildAgentContext(content) : null
       const result = await api.sendChatMessage(currentConversation.id, { content, agentId, model, attachmentIds, workspaceContext })
-      setDraft("")
-      setFiles([])
       if (workspace?.autoApply && result.assistantMessage?.metadata?.codeChangePlan) await applyCodePlan(result.assistantMessage, true)
       else await loadConversation(currentConversation.id)
       await refreshBootstrap(currentConversation.id)
     } catch (err) {
       setError(err.message)
-      if (currentConversation?.id) await loadConversation(currentConversation.id).catch(() => {})
+      const latest = currentConversation?.id ? await loadConversation(currentConversation.id).catch(() => null) : null
+      const lastUserMessage = [...(latest?.messages || [])].reverse().find(message => message.role === "user")
+      const persisted = lastUserMessage?.content === content && (!lastUserMessage.createdAt || new Date(lastUserMessage.createdAt).getTime() >= submittedAt - 5000)
+      if (!persisted) {
+        setDraft(current => current || content)
+        setFiles(current => current.length ? current : outgoingFiles)
+      }
     } finally {
       setPendingPrompt("")
+      setPendingFiles([])
       setSending(false)
+      window.requestAnimationFrame(() => composerRef.current?.focus())
     }
   }
 
@@ -433,7 +449,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
           {sending && pendingPrompt ? (
             <article className="chat-message user pending">
               <div className="chat-message-avatar">YOU</div>
-              <div className="chat-message-body"><header><strong>Você</strong><span>enviando</span></header><MessageContent content={pendingPrompt} plain />{workspace?.isReady ? <div className="chat-workspace-pending"><span>&lt;/&gt;</span><strong>{workspace.rootName}</strong><small>código local incluído no contexto</small></div> : null}{files.length ? <div className="chat-pending-files">{files.map(file => <span key={`${file.name}:${file.size}`}>{file.name}</span>)}</div> : null}</div>
+              <div className="chat-message-body"><header><strong>Você</strong><span>enviando</span></header><MessageContent content={pendingPrompt} plain />{workspace?.isReady ? <div className="chat-workspace-pending"><span>&lt;/&gt;</span><strong>{workspace.rootName}</strong><small>código local incluído no contexto</small></div> : null}{pendingFiles.length ? <div className="chat-pending-files">{pendingFiles.map(file => <span key={`${file.name}:${file.size}`}>{file.name}</span>)}</div> : null}</div>
             </article>
           ) : null}
 
@@ -452,7 +468,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
           <div className="chat-compose-row">
             <input ref={fileInputRef} hidden type="file" accept=".zip,application/zip,application/x-zip-compressed" multiple onChange={event => { addFiles(event.target.files); event.target.value = "" }} />
             <button className="chat-attach" onClick={() => fileInputRef.current?.click()} disabled={sending} title="Anexar ZIP">+</button>
-            <textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={handleKeyDown} disabled={sending} rows="2" placeholder={selectedAgent ? workspace?.isReady ? `Peça uma alteração em ${workspace.rootName} para ${selectedAgent.name}…` : `Pergunte ou peça uma execução para ${selectedAgent.name}…` : "Configure ou selecione um agente…"} />
+            <textarea ref={composerRef} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={handleKeyDown} disabled={sending} rows="2" placeholder={selectedAgent ? workspace?.isReady ? `Peça uma alteração em ${workspace.rootName} para ${selectedAgent.name}…` : `Pergunte ou peça uma execução para ${selectedAgent.name}…` : "Configure ou selecione um agente…"} />
             <button className="chat-send" onClick={send} disabled={sending || !draft.trim() || !selectedAgent || !model}>{sending ? <span className="chat-send-spinner" /> : "↑"}</button>
           </div>
           <div className="chat-composer-meta"><span>Enter envia · Shift+Enter quebra linha · Ctrl+S salva na IDE · arraste ZIPs aqui</span><strong>{selectedAgent?.name || "sem agente"} / {model || "sem modelo"}</strong></div>

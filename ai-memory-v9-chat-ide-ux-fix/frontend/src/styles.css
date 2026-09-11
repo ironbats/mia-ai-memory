@@ -673,6 +673,11 @@ main.workspace-layout.developer-mode.ide-wide .persistent-chat-column .chat-work
 .ide-search span { color: #5f6982; font-size: 12px; }
 .ide-search input { min-width: 0; border: 0; outline: 0; background: transparent; color: #bcc2d2; font-size: 8px; }
 .ide-search input::placeholder { color: #4f586e; }
+.ide-tree-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 0 8px 7px; border-bottom: 1px solid rgba(120,131,183,.08); }
+.ide-tree-controls button { min-width: 0; height: 25px; display: flex; align-items: center; justify-content: center; gap: 4px; border: 1px solid #232a40; border-radius: 7px; background: #0b101c; color: #77819a; font-size: 6px; font-weight: 750; white-space: nowrap; }
+.ide-tree-controls button:hover:not(:disabled) { border-color: rgba(143,130,255,.36); background: rgba(143,130,255,.08); color: #b8b2ff; }
+.ide-tree-controls button:disabled { opacity: .34; cursor: default; }
+.ide-tree-controls button span { color: #9388ff; font-size: 10px; line-height: 1; }
 .ide-tree { min-height: 0; overflow: auto; padding: 2px 5px 10px; }
 .ide-tree-row { width: 100%; min-width: 0; height: 27px; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 6px; background: transparent; color: #8f98af; text-align: left; }
 .ide-tree-row:hover { background: rgba(38,45,69,.48); color: #c3c8d8; }

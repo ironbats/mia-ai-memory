@@ -1,14 +1,14 @@
-import React, { useMemo, useRef, useState } from "react"
+import React, { useEffect, useMemo, useRef, useState } from "react"
 
-const TreeNode = ({ node, depth, workspace }) => {
-  const [expanded, setExpanded] = useState(depth < 1)
+const TreeNode = ({ node, depth, workspace, expandedPaths, onToggleDirectory }) => {
   if (node.type === "directory") {
+    const expanded = expandedPaths.has(node.path)
     return (
       <div className="ide-tree-group">
-        <button className="ide-tree-row directory" style={{ paddingLeft: 10 + depth * 13 }} onClick={() => setExpanded(value => !value)}>
+        <button className="ide-tree-row directory" style={{ paddingLeft: 10 + depth * 13 }} onClick={() => onToggleDirectory(node.path)}>
           <i>{expanded ? "⌄" : "›"}</i><span className="ide-tree-folder">{expanded ? "▾" : "▸"}</span><strong>{node.name}</strong>
         </button>
-        {expanded ? node.children.map(child => <TreeNode key={child.path} node={child} depth={depth + 1} workspace={workspace} />) : null}
+        {expanded ? node.children.map(child => <TreeNode key={child.path} node={child} depth={depth + 1} workspace={workspace} expandedPaths={expandedPaths} onToggleDirectory={onToggleDirectory} />) : null}
       </div>
     )
   }
@@ -28,6 +28,7 @@ const insertAtSelection = (value, start, end, insertion) => `${value.slice(0, st
 export default function CodeWorkspace({ workspace, layout = "split", onLayoutChange, onClose }) {
   const [query, setQuery] = useState("")
   const [localError, setLocalError] = useState("")
+  const [expandedPaths, setExpandedPaths] = useState(() => new Set())
   const editorRef = useRef(null)
   const lineRef = useRef(null)
   const active = workspace.activeTab
@@ -38,6 +39,40 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
     if (!normalized) return []
     return workspace.filePaths.filter(path => path.toLowerCase().includes(normalized)).slice(0, 120)
   }, [query, workspace.filePaths])
+  const directoryPaths = useMemo(() => {
+    const paths = []
+    const visit = nodes => {
+      for (const node of nodes || []) {
+        if (node.type !== "directory") continue
+        paths.push(node.path)
+        visit(node.children)
+      }
+    }
+    visit(workspace.tree)
+    return paths
+  }, [workspace.tree])
+
+  useEffect(() => {
+    setExpandedPaths(new Set())
+    setQuery("")
+  }, [workspace.workspaceSession])
+
+  useEffect(() => {
+    const valid = new Set(directoryPaths)
+    setExpandedPaths(current => new Set([...current].filter(path => valid.has(path))))
+  }, [directoryPaths])
+
+  const toggleDirectory = path => {
+    setExpandedPaths(current => {
+      const next = new Set(current)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  const expandAll = () => setExpandedPaths(new Set(directoryPaths))
+  const collapseAll = () => setExpandedPaths(new Set())
 
   const chooseDirectory = async () => {
     setLocalError("")
@@ -126,10 +161,14 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
           <aside className="ide-explorer">
             <div className="ide-explorer-head"><div><span>Explorer</span><strong>{workspace.rootName}</strong></div><button onClick={createFile} title="Novo arquivo">+</button></div>
             <div className="ide-search"><span>⌕</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar arquivo…" /></div>
+            <div className="ide-tree-controls">
+              <button onClick={collapseAll} disabled={!expandedPaths.size}><span>−</span>Recolher tudo</button>
+              <button onClick={expandAll} disabled={!directoryPaths.length || expandedPaths.size === directoryPaths.length}><span>+</span>Expandir tudo</button>
+            </div>
             <div className="ide-tree">
               {query ? searchResults.map(path => (
                 <button key={path} className={`ide-search-result${workspace.activePath === path ? " active" : ""}`} onClick={() => workspace.openFile(path).catch(error => setLocalError(error.message || String(error)))}><strong>{path.split("/").pop()}</strong><span>{path}</span></button>
-              )) : workspace.tree.map(node => <TreeNode key={node.path} node={node} depth={0} workspace={workspace} />)}
+              )) : workspace.tree.map(node => <TreeNode key={node.path} node={node} depth={0} workspace={workspace} expandedPaths={expandedPaths} onToggleDirectory={toggleDirectory} />)}
               {query && !searchResults.length ? <div className="ide-no-results">Nenhum arquivo encontrado.</div> : null}
             </div>
             <div className="ide-explorer-foot"><span>{workspace.filePaths.length} arquivos</span><span>{workspace.contextPaths.length} fixados no contexto</span></div>

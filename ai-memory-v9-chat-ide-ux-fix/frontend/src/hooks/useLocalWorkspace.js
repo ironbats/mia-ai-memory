@@ -88,6 +88,7 @@ export default function useLocalWorkspace() {
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState("")
   const [autoApply, setAutoApply] = useState(true)
+  const [workspaceSession, setWorkspaceSession] = useState(0)
   const fileHandlesRef = useRef(new Map())
   const directoryHandlesRef = useRef(new Map())
   const tabsRef = useRef([])
@@ -178,6 +179,7 @@ export default function useLocalWorkspace() {
     const permission = await handle.requestPermission({ mode: "readwrite" })
     if (permission !== "granted") throw new Error("Acesso de leitura e escrita à pasta não foi autorizado.")
     await scan(handle, true)
+    setWorkspaceSession(current => current + 1)
     return handle
   }, [scan, supported])
 
@@ -458,6 +460,7 @@ export default function useLocalWorkspace() {
     error,
     dirtyCount,
     autoApply,
+    workspaceSession,
     setAutoApply,
     selectDirectory,
     refresh,
