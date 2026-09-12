@@ -3,6 +3,7 @@ import SyntaxEditor from "./SyntaxEditor.jsx"
 import IdeDialog from "./IdeDialog.jsx"
 import IdeWorkbenchPanel from "./IdeWorkbenchPanel.jsx"
 import { analyzeDocument } from "../lib/ideLanguageService.js"
+import { confirmAction } from "../lib/dialogService.js"
 
 const fileBadge = path => {
   const name = String(path || "").split("/").pop() || ""
@@ -173,27 +174,29 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
 
   const selectDirectoryNow = async () => {
     setLocalError("")
+    setDialog(null)
     try {
       await workspace.selectDirectory()
-      setDialog(null)
     } catch (error) {
-      if (error?.name === "AbortError") setDialog(null)
-      else setLocalError(error.message || String(error))
+      if (error?.name !== "AbortError") setLocalError(error.message || String(error))
     }
   }
 
-  const chooseDirectory = () => {
-    if (workspace.isReady && workspace.dirtyCount) {
-      setDialog({
-        type: "change-folder",
-        title: "Trocar o projeto local?",
-        description: `${workspace.dirtyCount} arquivo(s) têm alterações não salvas. Salve ou confirme a troca para abrir outra pasta.`,
-        confirmLabel: "Selecionar outra pasta",
-        tone: "danger"
-      })
-      return
-    }
-    selectDirectoryNow()
+  const chooseDirectory = async () => {
+    const hasUnsavedChanges = workspace.isReady && workspace.dirtyCount > 0
+    const confirmed = await confirmAction({
+      tone: hasUnsavedChanges ? "danger" : "secure",
+      title: hasUnsavedChanges ? "Trocar o projeto local?" : workspace.isReady ? "Selecionar outro projeto local?" : "Abrir projeto local com acesso de edição?",
+      description: hasUnsavedChanges
+        ? `${workspace.dirtyCount} arquivo(s) têm alterações não salvas. Ao continuar, o navegador abrirá o seletor seguro de pasta e poderá solicitar novamente acesso de edição.`
+        : workspace.isReady
+          ? "O navegador abrirá o seletor seguro de pasta. O projeto atual será substituído na IDE somente depois que você escolher e autorizar a nova pasta."
+          : "A IDE precisa de leitura e escrita para salvar arquivos e aplicar alterações do agente. Depois desta confirmação, Chrome ou Edge exibirá a própria permissão de segurança do navegador.",
+      detail: "A permissão final de arquivos é uma camada de segurança do próprio navegador e não pode ser estilizada pela aplicação.",
+      confirmLabel: hasUnsavedChanges ? "Continuar e trocar pasta" : workspace.isReady ? "Selecionar outra pasta" : "Continuar e selecionar pasta"
+    })
+    if (!confirmed) return
+    await selectDirectoryNow()
   }
 
   const requestCreateFile = () => setDialog({
@@ -241,7 +244,6 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       setDialog(null)
       return
     }
-    if (dialog.type === "change-folder") await selectDirectoryNow()
   }
 
   const openQuick = () => {

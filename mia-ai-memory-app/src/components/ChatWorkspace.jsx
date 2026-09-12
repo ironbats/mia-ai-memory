@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { api } from "../lib/api.js"
+import { confirmAction } from "../lib/dialogService.js"
 import MessageContent from "./MessageContent.jsx"
 
 const formatWhen = value => value ? new Date(value).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "agora"
@@ -187,7 +188,13 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   const removeConversation = async (event, item) => {
     event.stopPropagation()
     if (sending && activeId === item.id) return
-    if (!window.confirm(`Excluir a conversa “${item.title}”?`)) return
+    const confirmed = await confirmAction({
+      tone: "danger",
+      title: "Excluir conversa?",
+      description: `A conversa “${item.title}” e seu histórico deixarão de aparecer no chat. Esta ação não altera as memórias duráveis já consolidadas do projeto.`,
+      confirmLabel: "Excluir conversa"
+    })
+    if (!confirmed) return
     setError("")
     try {
       await api.deleteChatConversation(item.id)

@@ -4,6 +4,7 @@ import CredentialEditor from "./CredentialEditor.jsx"
 import McpEditor from "./McpEditor.jsx"
 import MetricCard from "./MetricCard.jsx"
 import { api } from "../lib/api.js"
+import { confirmAction } from "../lib/dialogService.js"
 
 const number = value => new Intl.NumberFormat("pt-BR").format(Number(value || 0))
 
@@ -68,7 +69,14 @@ export default function IntegrationHub({ scope }) {
   }
 
   const remove = async (kind, item) => {
-    if (!window.confirm(`Excluir ${item.name}?`)) return
+    const kindLabel = kind === "agent" ? "agente" : kind === "mcp" ? "MCP" : "credencial"
+    const confirmed = await confirmAction({
+      tone: "danger",
+      title: `Excluir ${kindLabel}?`,
+      description: `Você está removendo “${item.name}”. A exclusão não deve ser usada para uma desativação temporária.`,
+      confirmLabel: `Excluir ${kindLabel}`
+    })
+    if (!confirmed) return
     setError("")
     try {
       if (kind === "agent") await api.deleteConfigAgent(item.id)

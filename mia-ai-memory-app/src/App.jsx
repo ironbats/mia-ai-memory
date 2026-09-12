@@ -187,26 +187,10 @@ export default function App() {
     try {
       await api.sync(scope)
     } catch (err) {
-      if (err.status !== 403) {
-        setActionError(err.message)
-        setSyncing(false)
-        await refreshTelemetry(scope)
-        return
-      }
-      const token = window.prompt("COGNITIVE_ADMIN_TOKEN") || ""
-      if (!token) {
-        setActionError("Sincronização protegida: informe o COGNITIVE_ADMIN_TOKEN.")
-        setSyncing(false)
-        return
-      }
-      try {
-        await api.sync(scope, token)
-      } catch (retryError) {
-        setActionError(retryError.message)
-        setSyncing(false)
-        await refreshTelemetry(scope)
-        return
-      }
+      setActionError(err.message)
+      setSyncing(false)
+      await refreshTelemetry(scope)
+      return
     }
     try {
       await loadScopes()
@@ -255,15 +239,8 @@ export default function App() {
   const sessionsDetail = `${number(summary?.sessions?.observations)} observações · ${number(summary?.chat?.captured_turns)} capturas web`
   const syncDetail = summary?.sync?.status === "failed" ? "failed · diagnóstico acima" : summary?.sync?.status || "sem sync"
 
-  const openDeveloperWorkspace = async () => {
+  const openDeveloperWorkspace = () => {
     setIdeOpen(true)
-    if (!localWorkspace.isReady && localWorkspace.supported) {
-      try {
-        await localWorkspace.selectDirectory()
-      } catch (error) {
-        if (error?.name !== "AbortError") setActionError(error.message || String(error))
-      }
-    }
   }
 
   return (

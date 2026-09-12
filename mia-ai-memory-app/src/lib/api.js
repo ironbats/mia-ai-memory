@@ -1,3 +1,5 @@
+import { promptValue } from "./dialogService.js"
+
 const request = async (path, options = {}) => {
   const response = await fetch(path, {
     ...options,
@@ -18,8 +20,17 @@ const request = async (path, options = {}) => {
 
 const storedAdminToken = () => window.sessionStorage.getItem("cognitive-admin-token") || ""
 
-const askAdminToken = () => {
-  const token = window.prompt("COGNITIVE_ADMIN_TOKEN") || ""
+const askAdminToken = async () => {
+  const token = await promptValue({
+    tone: "secure",
+    title: "Autorizar ação administrativa",
+    description: "Esta operação exige o token administrativo do Cognitive API. O valor será mantido apenas nesta sessão do navegador.",
+    detail: "COGNITIVE_ADMIN_TOKEN",
+    inputLabel: "Token administrativo",
+    inputType: "password",
+    placeholder: "Informe o token",
+    confirmLabel: "Autorizar"
+  })
   if (token) window.sessionStorage.setItem("cognitive-admin-token", token)
   return token
 }
@@ -36,7 +47,7 @@ const adminRequest = async (path, options = {}) => {
     return await execute(storedAdminToken())
   } catch (error) {
     if (error.status !== 403) throw error
-    const token = askAdminToken()
+    const token = await askAdminToken()
     if (!token) throw error
     return execute(token)
   }
@@ -63,7 +74,7 @@ const rawAdminRequest = async (path, options = {}) => {
     return await execute(storedAdminToken())
   } catch (error) {
     if (error.status !== 403) throw error
-    const token = askAdminToken()
+    const token = await askAdminToken()
     if (!token) throw error
     return execute(token)
   }
@@ -94,9 +105,8 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ ...scope, query, limit })
   }),
-  sync: (scope, adminToken = "") => request("/api/v1/cognitive/sync", {
+  sync: scope => adminRequest("/api/v1/cognitive/sync", {
     method: "POST",
-    headers: adminToken ? { "X-Admin-Token": adminToken } : {},
     body: JSON.stringify(scope || {})
   }),
   integrationsSummary: () => request("/api/v1/cognitive/integrations/summary"),
