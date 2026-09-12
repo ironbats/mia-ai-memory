@@ -6,14 +6,32 @@ import { config } from "./config.js"
 const failure = (message, status = 400) => Object.assign(new Error(message), { status, expose: true })
 
 const textExtensions = new Set([
-  ".c", ".cc", ".cpp", ".cs", ".css", ".csv", ".go", ".gradle", ".graphql", ".h", ".hpp",
-  ".html", ".ini", ".java", ".js", ".json", ".jsx", ".kt", ".kts", ".lock", ".md", ".mjs", ".mts",
-  ".php", ".properties", ".py", ".rb", ".rs", ".scss", ".sh", ".sql", ".svelte", ".swift", ".toml",
-  ".ts", ".tsx", ".txt", ".vue", ".xml", ".yaml", ".yml"
+  ".c", ".cc", ".conf", ".cpp", ".cs", ".css", ".csv", ".dart", ".ex", ".exs", ".go", ".gradle",
+  ".graphql", ".groovy", ".h", ".hpp", ".hrl", ".html", ".http", ".ini", ".java", ".js", ".json",
+  ".jsx", ".kt", ".kts", ".lock", ".lua", ".md", ".mjs", ".mod", ".mts", ".php", ".pl", ".properties",
+  ".proto", ".py", ".r", ".rb", ".rs", ".scala", ".scss", ".sh", ".sol", ".sql", ".sum", ".svelte",
+  ".swift", ".tf", ".tfvars", ".toml", ".ts", ".tsx", ".txt", ".vue", ".xml", ".yaml", ".yml", ".zig"
 ])
 
-const textNames = new Set(["dockerfile", "makefile", "procfile", "gemfile", "rakefile", "license", "readme"])
-const ignoredSegments = new Set([".git", ".idea", ".next", ".turbo", ".vscode", "build", "coverage", "dist", "node_modules", "target", "vendor"])
+const textNames = new Set([
+  "agents.md", "cargo.toml", "claude.md", "cmakelists.txt", "composer.json", "dockerfile", "gemfile", "go.mod",
+  "go.sum", "gradle.properties", "makefile", "package-lock.json", "package.json", "pnpm-lock.yaml", "procfile",
+  "pyproject.toml", "rakefile", "readme", "requirements.txt", "settings.gradle", "settings.gradle.kts", "yarn.lock"
+])
+const priorityNames = new Set([
+  "agents.md", "cargo.toml", "claude.md", "composer.json", "docker-compose.yml", "docker-compose.yaml", "dockerfile",
+  "go.mod", "go.sum", "package-lock.json", "package.json", "pnpm-lock.yaml", "pom.xml", "pyproject.toml", "readme.md",
+  "requirements.txt", "settings.gradle", "settings.gradle.kts", "vite.config.js", "vite.config.ts", "yarn.lock"
+])
+const ignoredSegments = new Set([
+  ".cache", ".git", ".gradle", ".idea", ".next", ".nuxt", ".pytest_cache", ".terraform", ".turbo", ".venv",
+  ".vscode", "__pycache__", "build", "coverage", "dist", "node_modules", "target", "vendor", "venv"
+])
+const sourceSegments = new Set(["app", "cmd", "components", "crates", "internal", "lib", "pkg", "server", "services", "src"])
+const queryStopWords = new Set([
+  "para", "com", "sem", "que", "uma", "uns", "das", "dos", "por", "the", "and", "for", "with", "from", "this",
+  "that", "como", "isso", "essa", "esse", "faca", "fazer", "preciso", "quero", "arquivo", "arquivos", "projeto"
+])
 const localSignature = 0x04034b50
 const centralSignature = 0x02014b50
 const eocdSignature = 0x06054b50
@@ -38,11 +56,12 @@ const normalizedEntryName = value => {
   return segments.join("/") + (name.endsWith("/") ? "/" : "")
 }
 
+const ignoredPath = name => name.toLowerCase().split("/").some(segment => ignoredSegments.has(segment))
+
 const shouldReadText = name => {
-  const segments = name.toLowerCase().split("/")
-  if (segments.some(segment => ignoredSegments.has(segment))) return false
+  if (ignoredPath(name)) return false
   const base = path.posix.basename(name).toLowerCase()
-  if (base === ".env" || base.startsWith(".env.")) return false
+  if (base === ".env" || (base.startsWith(".env.") && base !== ".env.example")) return false
   const extension = path.posix.extname(base)
   return textExtensions.has(extension) || textNames.has(base) || [...textNames].some(prefix => base.startsWith(`${prefix}.`))
 }
@@ -58,6 +77,11 @@ const binaryLike = buffer => {
 const safeFileName = value => {
   const base = path.posix.basename(String(value || "attachment.zip").replaceAll("\\", "/"))
   return base.replace(/[^A-Za-z0-9._() -]+/g, "_").slice(0, 180) || "attachment.zip"
+}
+
+const archiveRootName = value => {
+  const name = safeFileName(value).replace(/\.zip$/i, "").trim()
+  return name || "attached-project"
 }
 
 const findEocd = buffer => {
@@ -90,6 +114,7 @@ const readEntries = buffer => {
   let offset = centralOffset
   let totalUncompressed = 0
   const entries = []
+  const seenNames = new Set()
   for (let index = 0; index < totalEntries; index += 1) {
     if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== centralSignature) throw failure("ZIP directory entry is malformed")
     const versionMadeBy = buffer.readUInt16LE(offset + 4)
@@ -112,6 +137,8 @@ const readEntries = buffer => {
 
     const rawName = buffer.subarray(offset + 46, offset + 46 + nameLength)
     const name = normalizedEntryName(rawName.toString((flags & 0x0800) !== 0 ? "utf8" : "latin1"))
+    if (seenNames.has(name)) throw failure(`ZIP contains a duplicate path: ${name}`)
+    seenNames.add(name)
     const unixMode = (versionMadeBy >>> 8) === 3 ? (externalAttributes >>> 16) & 0xffff : 0
     if ((unixMode & 0o170000) === 0o120000) throw failure("ZIP symbolic links are not supported")
 
@@ -147,6 +174,119 @@ const readEntryData = (buffer, entry, maxOutputBytes) => {
   return data
 }
 
+const queryTokens = value => [...new Set(String(value || "").toLowerCase().match(/[a-z0-9_.-]{3,}/g) || [])]
+  .filter(token => !queryStopWords.has(token))
+  .slice(0, 48)
+
+const commonRoot = entries => {
+  const roots = new Set()
+  let files = 0
+  for (const entry of entries) {
+    if (entry.directory || ignoredPath(entry.name)) continue
+    const segments = entry.name.split("/").filter(Boolean)
+    if (segments.length < 2) return ""
+    roots.add(segments[0])
+    files += 1
+    if (roots.size > 1) return ""
+  }
+  return files ? [...roots][0] : ""
+}
+
+const relativeEntryPath = (name, root) => root && name.startsWith(`${root}/`) ? name.slice(root.length + 1) : name
+
+const priorityFor = (name, tokens) => {
+  const lower = name.toLowerCase()
+  const base = path.posix.basename(lower)
+  const segments = lower.split("/")
+  let score = 0
+  if (priorityNames.has(base)) score += 240
+  if (base.startsWith("readme")) score += 170
+  if (base === "agents.md" || base === "claude.md") score += 240
+  if (segments.length <= 2) score += 80
+  if (segments.some(segment => sourceSegments.has(segment))) score += 55
+  if (segments.some(segment => ["test", "tests", "spec", "specs", "fixtures"].includes(segment))) score -= 18
+  for (const token of tokens) {
+    if (lower.includes(token)) score += 130
+    if (base.includes(token)) score += 90
+  }
+  score -= Math.min(40, Math.max(0, segments.length - 2) * 3)
+  return score
+}
+
+const languageFor = name => {
+  const base = path.posix.basename(name).toLowerCase()
+  if (base === "dockerfile") return "dockerfile"
+  const extension = path.posix.extname(base).replace(/^\./, "")
+  return extension || "text"
+}
+
+const contextualize = (buffer, parsed, options = {}) => {
+  const maxBytes = Math.max(32768, Number(options.maxBytes || config.chatAttachmentContextMaxBytes))
+  const maxFiles = Math.max(1, Number(options.maxFiles || config.chatAttachmentContextMaxFiles))
+  const tokens = queryTokens(options.query)
+  const root = commonRoot(parsed.entries)
+  const sourceEntries = parsed.entries
+    .filter(entry => !entry.directory && !ignoredPath(entry.name))
+    .map(entry => ({ ...entry, relativePath: relativeEntryPath(entry.name, root) }))
+    .filter(entry => entry.relativePath)
+  const manifest = sourceEntries
+    .slice(0, config.chatWorkspaceManifestMaxFiles)
+    .map(entry => ({ path: entry.relativePath, size: entry.uncompressedSize, directory: false }))
+  const manifestTruncated = sourceEntries.length > manifest.length
+  const manifestBudget = Math.min(131072, Math.max(16384, Math.floor(maxBytes * 0.24)))
+  const manifestLines = []
+  let manifestBytes = 0
+  for (const item of manifest) {
+    const line = `${item.path}\n`
+    const bytes = Buffer.byteLength(line)
+    if (manifestBytes + bytes > manifestBudget) break
+    manifestLines.push(item.path)
+    manifestBytes += bytes
+  }
+  const manifestHeader = [
+    `ARCHIVE MANIFEST · ${sourceEntries.length} source files${manifestTruncated || manifestLines.length < sourceEntries.length ? " · truncated" : ""}`,
+    ...manifestLines
+  ].join("\n")
+  const contextParts = [manifestHeader]
+  let contextBytes = Buffer.byteLength(manifestHeader)
+  const contextFiles = []
+  const maxEntryBytes = Math.min(524288, config.chatWorkspaceFileMaxBytes)
+  const candidates = sourceEntries
+    .filter(entry => shouldReadText(entry.relativePath) && entry.uncompressedSize <= maxEntryBytes)
+    .sort((left, right) => priorityFor(right.relativePath, tokens) - priorityFor(left.relativePath, tokens) || left.relativePath.localeCompare(right.relativePath))
+
+  for (const entry of candidates) {
+    if (contextFiles.length >= maxFiles) break
+    const remaining = maxBytes - contextBytes
+    if (remaining <= 1024) break
+    const data = readEntryData(buffer, entry, maxEntryBytes)
+    if (binaryLike(data)) continue
+    const content = data.toString("utf8")
+    if (!content.trim()) continue
+    const block = `\n\n--- FILE ${entry.relativePath} ---\n${content}`
+    const bytes = Buffer.byteLength(block)
+    if (bytes > remaining) continue
+    contextParts.push(block)
+    contextBytes += bytes
+    contextFiles.push({
+      path: entry.relativePath,
+      content,
+      sha256: createHash("sha256").update(data).digest("hex"),
+      language: languageFor(entry.relativePath)
+    })
+  }
+
+  return {
+    root,
+    manifest,
+    manifestTruncated,
+    sourceFileCount: sourceEntries.length,
+    contextFiles,
+    contextBytes,
+    textContext: contextParts.join("").trim()
+  }
+}
+
 const dosDateTime = date => {
   const value = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date()
   const year = Math.min(2107, Math.max(1980, value.getFullYear()))
@@ -166,9 +306,12 @@ const buildZip = files => {
   const centralParts = []
   let localOffset = 0
   const stamp = dosDateTime(new Date())
+  const usedNames = new Set()
 
   for (const file of files) {
     const name = normalizedEntryName(file.name).replace(/\/$/, "")
+    if (usedNames.has(name)) throw failure(`duplicate ZIP export path: ${name}`, 409)
+    usedNames.add(name)
     const nameBuffer = Buffer.from(name, "utf8")
     const content = Buffer.isBuffer(file.content) ? file.content : Buffer.from(file.content || "")
     const deflated = content.length ? deflateRawSync(content, { level: 6 }) : Buffer.alloc(0)
@@ -228,38 +371,88 @@ const buildZip = files => {
   return Buffer.concat([...localParts, centralBuffer, eocd])
 }
 
-export const inspectZip = buffer => {
+export const inspectZip = (buffer, options = {}) => {
   const parsed = readEntries(buffer)
-  const manifest = parsed.entries.map(entry => ({ path: entry.name, size: entry.uncompressedSize, directory: entry.directory }))
-  const contextParts = []
+  const contextual = contextualize(buffer, parsed, options)
+  return {
+    sha256: createHash("sha256").update(buffer).digest("hex"),
+    manifest: contextual.manifest,
+    manifestTruncated: contextual.manifestTruncated,
+    sourceFileCount: contextual.sourceFileCount,
+    textContext: contextual.textContext,
+    contextFiles: contextual.contextFiles,
+    contextBytes: contextual.contextBytes,
+    archiveRoot: contextual.root,
+    totalUncompressedBytes: parsed.totalUncompressed
+  }
+}
+
+export const attachmentWorkspaceContext = (inspection, attachment) => ({
+  source: "attachment",
+  sourceAttachmentId: attachment.id,
+  sourceAttachmentIds: [attachment.id],
+  sourceAttachmentName: attachment.fileName,
+  sourceAttachmentNames: [attachment.fileName],
+  rootName: inspection.archiveRoot || archiveRootName(attachment.fileName),
+  activeFile: null,
+  git: null,
+  manifest: inspection.manifest.map(item => item.path),
+  manifestTruncated: inspection.manifestTruncated,
+  files: inspection.contextFiles,
+  stats: {
+    fileCount: inspection.sourceFileCount,
+    contextFileCount: inspection.contextFiles.length,
+    contextBytes: inspection.contextBytes
+  }
+})
+
+export const attachmentsWorkspaceContext = analyses => {
+  const values = (analyses || []).filter(item => item?.inspection && item?.attachment)
+  if (!values.length || values.length !== (analyses || []).length) return null
+  if (values.length === 1) return attachmentWorkspaceContext(values[0].inspection, values[0].attachment)
+
+  const manifest = []
+  const files = []
+  const usedPrefixes = new Set()
+  let manifestTruncated = false
+  let fileCount = 0
   let contextBytes = 0
 
-  for (const entry of parsed.entries) {
-    if (entry.directory || !shouldReadText(entry.name) || entry.uncompressedSize > 262144) continue
-    const remaining = config.chatAttachmentContextMaxBytes - contextBytes
-    if (remaining <= 0) break
-    const data = readEntryData(buffer, entry, Math.min(262144, remaining))
-    if (binaryLike(data)) continue
-    const value = data.toString("utf8").trim()
-    if (!value) continue
-    const block = `\n--- FILE ${entry.name} ---\n${value}\n`
-    const bytes = Buffer.byteLength(block)
-    if (bytes > remaining) {
-      const partial = Buffer.from(block).subarray(0, remaining).toString("utf8")
-      contextParts.push(partial)
-      contextBytes += Buffer.byteLength(partial)
-      break
-    }
-    contextParts.push(block)
-    contextBytes += bytes
+  for (let index = 0; index < values.length; index += 1) {
+    const { inspection, attachment } = values[index]
+    const base = archiveRootName(attachment.fileName).replace(/\s+/g, "-").toLowerCase() || `archive-${index + 1}`
+    let prefix = `zip-${index + 1}-${base}`
+    while (usedPrefixes.has(prefix)) prefix = `${prefix}-${index + 1}`
+    usedPrefixes.add(prefix)
+    for (const item of inspection.manifest) manifest.push(`${prefix}/${item.path}`)
+    for (const item of inspection.contextFiles) files.push({ ...item, path: `${prefix}/${item.path}` })
+    manifestTruncated = manifestTruncated || inspection.manifestTruncated
+    fileCount += inspection.sourceFileCount
+    contextBytes += inspection.contextBytes
   }
 
   return {
-    sha256: createHash("sha256").update(buffer).digest("hex"),
+    source: "attachment",
+    sourceAttachmentId: null,
+    sourceAttachmentIds: values.map(item => item.attachment.id),
+    sourceAttachmentName: null,
+    sourceAttachmentNames: values.map(item => item.attachment.fileName),
+    rootName: "attached-workspace",
+    activeFile: null,
+    git: null,
     manifest,
-    textContext: contextParts.join("").trim(),
-    totalUncompressedBytes: parsed.totalUncompressed
+    manifestTruncated,
+    files,
+    stats: { fileCount, contextFileCount: files.length, contextBytes }
   }
+}
+
+export const buildCodeChangeZip = plan => {
+  const files = (plan?.operations || [])
+    .filter(operation => operation?.type === "write" && typeof operation.content === "string")
+    .map(operation => ({ name: operation.path, content: Buffer.from(operation.content, "utf8") }))
+  if (!files.length) throw failure("code change plan has no downloadable files", 409)
+  return buildZip(files)
 }
 
 export const buildConversationZip = ({ conversation, messages, attachments }) => {

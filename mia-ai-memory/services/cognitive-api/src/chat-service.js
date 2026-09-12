@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { buildConversationZip, inspectZip } from "./attachment-service.js"
+import { attachmentsWorkspaceContext, buildCodeChangeZip, buildConversationZip, inspectZip } from "./attachment-service.js"
 import { chatRepository } from "./chat-repository.js"
 import { codeChangeInstructions, extractCodeChangePlan, normalizeWorkspaceContext, workspacePromptSection } from "./code-change-service.js"
 import { config } from "./config.js"
@@ -96,7 +96,7 @@ const systemPrompt = ({ conversation, durableMemory, relatedChat, attachmentCont
     chatMemory,
     "ZIP ATTACHMENT CONTEXT",
     attachments,
-    "LOCAL DEVELOPER WORKSPACE",
+    "DEVELOPER SOURCE WORKSPACE",
     workspacePromptSection(workspaceContext)
   ].filter(Boolean).join("\n\n")
 }
@@ -112,6 +112,27 @@ const validateAttachments = async (conversationId, ids) => {
     values.push(attachment)
   }
   return values
+}
+
+const prepareAttachmentContexts = async (attachments, prompt) => {
+  if (!attachments.length) return { contexts: [], workspace: null, analyses: [] }
+  const maxBytes = Math.max(32768, Math.floor(config.chatAttachmentContextMaxBytes / attachments.length))
+  const maxFiles = Math.max(8, Math.floor(config.chatAttachmentContextMaxFiles / attachments.length))
+  const analyses = []
+  for (const attachment of attachments) {
+    const stored = await chatRepository.attachmentContent(attachment.id)
+    if (!stored?.content) {
+      analyses.push({ attachment, inspection: null, textContext: attachment.textContext || "" })
+      continue
+    }
+    const inspection = inspectZip(stored.content, { query: prompt, maxBytes, maxFiles })
+    analyses.push({ attachment, inspection, textContext: inspection.textContext || attachment.textContext || "" })
+  }
+  return {
+    contexts: analyses.filter(item => item.textContext).map(item => ({ fileName: item.attachment.fileName, textContext: item.textContext })),
+    workspace: attachmentsWorkspaceContext(analyses),
+    analyses
+  }
 }
 
 const resolveAgentAndModel = async (conversation, agentId, requestedModel) => {
@@ -222,6 +243,20 @@ export const chatService = {
     }
   },
 
+  async exportCodeChange(conversationId, messageId) {
+    const conversation = await chatRepository.conversation(conversationId)
+    if (!conversation) throw failure("conversation not found", 404)
+    const message = await chatRepository.message(messageId, conversationId)
+    if (!message || message.role !== "assistant") throw failure("assistant message not found", 404)
+    const plan = message.metadata?.codeChangePlan
+    if (!plan) throw failure("message has no code change plan", 409)
+    const rootName = String(plan.workspace?.rootName || conversation.title || "solution").replace(/[^A-Za-z0-9._ -]+/g, "_").trim() || "solution"
+    return {
+      fileName: `${rootName}-solution.zip`,
+      content: buildCodeChangeZip(plan)
+    }
+  },
+
   async sendMessage(conversationId, body) {
     const conversation = await chatRepository.conversation(conversationId)
     if (!conversation) throw failure("conversation not found", 404)
@@ -229,6 +264,8 @@ export const chatService = {
     const workspaceContext = normalizeWorkspaceContext(body.workspaceContext)
     const attachmentIds = Array.isArray(body.attachmentIds) ? body.attachmentIds : []
     const attachments = await validateAttachments(conversationId, attachmentIds)
+    const preparedAttachments = await prepareAttachmentContexts(attachments, prompt)
+    const executionWorkspace = preparedAttachments.workspace || workspaceContext
     const history = await chatRepository.recentMessages(conversationId, config.chatHistoryLimit)
     const { agent, secrets, model } = await resolveAgentAndModel(conversation, body.agentId || conversation.defaultAgentId, body.model)
 
@@ -242,7 +279,7 @@ export const chatService = {
       metadata: {
         selectedAgentId: agent.id,
         selectedModel: model,
-        ...(workspaceContext ? { workspace: { rootName: workspaceContext.rootName, activeFile: workspaceContext.activeFile, branch: workspaceContext.git?.branch || null, head: workspaceContext.git?.head || null, contextFileCount: workspaceContext.stats.contextFileCount } } : {})
+        ...(executionWorkspace ? { workspace: { source: executionWorkspace.source || "local", rootName: executionWorkspace.rootName, activeFile: executionWorkspace.activeFile, branch: executionWorkspace.git?.branch || null, head: executionWorkspace.git?.head || null, contextFileCount: executionWorkspace.stats.contextFileCount } } : {})
       }
     })
     if (attachmentIds.length) {
@@ -266,19 +303,24 @@ export const chatService = {
         config.chatMemoryRecallLimit * 2
       )
     ])
-    const attachmentContexts = attachments.filter(item => item.textContext).map(item => ({ fileName: item.fileName, textContext: item.textContext }))
-    const promptContext = systemPrompt({ conversation, durableMemory, relatedChat, attachmentContexts, workspaceContext })
+    const attachmentContexts = executionWorkspace?.source === "attachment" ? [] : preparedAttachments.contexts
+    const promptContext = systemPrompt({ conversation, durableMemory, relatedChat, attachmentContexts, workspaceContext: executionWorkspace })
     const memoryContext = {
       durable: durableMemory.memories.map(({ path, title, kind, rank }) => ({ path, title, kind, rank })),
       priorChat: relatedChat.map(item => ({ id: item.id, conversationId: item.conversation_id, title: item.title, role: item.role, rank: Number(item.rank || 0) })),
       attachments: attachments.map(item => ({ id: item.id, fileName: item.fileName, sha256: item.sha256, files: item.manifest.length })),
-      workspace: workspaceContext ? {
-        rootName: workspaceContext.rootName,
-        activeFile: workspaceContext.activeFile,
-        fileCount: workspaceContext.stats.fileCount,
-        contextFileCount: workspaceContext.stats.contextFileCount,
-        contextBytes: workspaceContext.stats.contextBytes,
-        git: workspaceContext.git ? { branch: workspaceContext.git.branch, head: workspaceContext.git.head, detached: workspaceContext.git.detached, worktree: workspaceContext.git.worktree } : null
+      workspace: executionWorkspace ? {
+        source: executionWorkspace.source || "local",
+        sourceAttachmentId: executionWorkspace.sourceAttachmentId || null,
+        sourceAttachmentIds: executionWorkspace.sourceAttachmentIds || [],
+        sourceAttachmentName: executionWorkspace.sourceAttachmentName || null,
+        sourceAttachmentNames: executionWorkspace.sourceAttachmentNames || [],
+        rootName: executionWorkspace.rootName,
+        activeFile: executionWorkspace.activeFile,
+        fileCount: executionWorkspace.stats.fileCount,
+        contextFileCount: executionWorkspace.stats.contextFileCount,
+        contextBytes: executionWorkspace.stats.contextBytes,
+        git: executionWorkspace.git ? { branch: executionWorkspace.git.branch, head: executionWorkspace.git.head, detached: executionWorkspace.git.detached, worktree: executionWorkspace.git.worktree } : null
       } : null,
       embeddingError: durableMemory.embeddingError,
       retrievalError: durableMemory.retrievalError
@@ -323,7 +365,7 @@ export const chatService = {
       throw error
     }
 
-    const codeChange = extractCodeChangePlan(execution.content, workspaceContext)
+    const codeChange = extractCodeChangePlan(execution.content, executionWorkspace)
     let assistantMessage = await chatRepository.updateMessage(assistantId, {
       content: codeChange.content,
       status: "completed",
@@ -390,17 +432,8 @@ export const chatService = {
       error: body.error ? String(body.error).slice(0, 1000) : null,
       finishedAt: text(body.finishedAt || body.appliedAt || new Date().toISOString(), "finishedAt", 80, true)
     }
-    const compactPlan = status === "applied" ? {
-      ...message.metadata.codeChangePlan,
-      status: "applied",
-      operations: (message.metadata.codeChangePlan.operations || []).map(operation => ({
-        type: operation.type,
-        path: operation.path,
-        baseSha256: operation.baseSha256 || null,
-        expectedExists: operation.expectedExists === true
-      }))
-    } : message.metadata.codeChangePlan
-    let updated = await chatRepository.updateMessage(messageId, { metadata: { codeChangePlan: compactPlan, codeChangeResult: result } })
+    const retainedPlan = status === "applied" ? { ...message.metadata.codeChangePlan, status: "applied" } : message.metadata.codeChangePlan
+    let updated = await chatRepository.updateMessage(messageId, { metadata: { codeChangePlan: retainedPlan, codeChangeResult: result } })
     if (status === "applied") {
       const summary = String(message.metadata.codeChangePlan.summary || "Alterações de código aplicadas").slice(0, 1000)
       const appliedFiles = files.map(item => `${item.type || "write"} ${item.path}`).join("\n")

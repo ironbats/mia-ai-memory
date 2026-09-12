@@ -95,6 +95,11 @@ export const normalizeWorkspaceContext = input => {
   } : null
 
   return {
+    source: "local",
+    sourceAttachmentId: null,
+    sourceAttachmentIds: [],
+    sourceAttachmentName: null,
+    sourceAttachmentNames: [],
     rootName,
     activeFile,
     git,
@@ -110,16 +115,16 @@ export const normalizeWorkspaceContext = input => {
 }
 
 export const workspacePromptSection = workspace => {
-  if (!workspace) return "No local developer workspace is connected for this turn."
+  if (!workspace) return "No developer source workspace is available for this turn."
   const manifest = workspace.manifest.length ? workspace.manifest.join("\n") : "No project manifest supplied."
   const files = workspace.files.length
     ? workspace.files.map(file => `FILE ${file.path}\nSHA256 ${file.sha256 || "unknown"}\nLANGUAGE ${file.language || "unknown"}\n${file.content}`).join("\n\n")
     : "No source file contents were selected for this turn."
+  const attachment = workspace.source === "attachment"
   return [
-    `LOCAL WORKSPACE ${workspace.rootName}`,
-    `Active file: ${workspace.activeFile || "none"}`,
-    `Git repository: ${workspace.git ? "yes" : "no"}`,
-    ...(workspace.git ? [`Git branch: ${workspace.git.branch || (workspace.git.detached ? "detached HEAD" : "unknown")}`, `Git HEAD: ${workspace.git.head || "unknown"}`] : []),
+    `${attachment ? "ATTACHED ZIP WORKSPACE" : "LOCAL WORKSPACE"} ${workspace.rootName}`,
+    ...(attachment ? [`Source attachment${workspace.sourceAttachmentNames?.length > 1 ? "s" : ""}: ${workspace.sourceAttachmentNames?.length ? workspace.sourceAttachmentNames.join(", ") : workspace.sourceAttachmentName || "ZIP attachment"}`] : [`Active file: ${workspace.activeFile || "none"}`, `Git repository: ${workspace.git ? "yes" : "no"}`]),
+    ...(!attachment && workspace.git ? [`Git branch: ${workspace.git.branch || (workspace.git.detached ? "detached HEAD" : "unknown")}`, `Git HEAD: ${workspace.git.head || "unknown"}`] : []),
     `Project files: ${workspace.stats.fileCount}${workspace.manifestTruncated ? "+" : ""}`,
     "PROJECT MANIFEST",
     manifest,
@@ -130,17 +135,20 @@ export const workspacePromptSection = workspace => {
 
 export const codeChangeInstructions = workspace => {
   if (!workspace) return ""
+  const attachment = workspace.source === "attachment"
   return [
-    "A local developer workspace is connected to this conversation.",
-    "When the user explicitly asks you to create, modify, refactor, delete, fix, or implement code in that workspace, produce an executable local code-change plan in addition to your concise explanation.",
-    "Do not claim that local files were already changed. The browser applies the plan after your response.",
-    "Only change files for which the supplied workspace context is sufficient. If required code is missing, explain which file is needed and do not invent a destructive plan.",
+    attachment ? "A ZIP project snapshot is attached to this conversation." : "A local developer workspace is connected to this conversation.",
+    attachment
+      ? "When the user explicitly asks you to create, modify, refactor, delete, fix, or implement code from that ZIP, produce an executable code-change plan so the generated solution can be downloaded as a ZIP."
+      : "When the user explicitly asks you to create, modify, refactor, delete, fix, or implement code in that workspace, produce an executable local code-change plan in addition to your concise explanation.",
+    attachment ? "Do not claim that the attached archive was modified. The generated plan is a downloadable solution artifact." : "Do not claim that local files were already changed. The browser applies the plan after your response.",
+    "Only change files for which the supplied source context is sufficient. If required code is missing, explain which file is needed and do not invent a destructive plan.",
     "Return complete file contents for every write operation. Never use placeholders such as omitted code, rest of file, unchanged code, TODO-only stubs, or ellipses in place of existing implementation.",
     "Do not add explanatory comments inside code unless they are required by the source language or existing project convention.",
     "Never write secrets, .env files, private keys, certificates, dependency directories, build output, or .git content.",
-    "Use paths relative to the workspace root only.",
+    "Use paths relative to the project root only.",
     "Allowed operations are write and delete.",
-    `Append exactly one machine-readable block using these markers when code changes are ready:\n${MARKER_START}\n{\"summary\":\"short summary\",\"operations\":[{\"type\":\"write\",\"path\":\"src/example.js\",\"content\":\"complete file content\"},{\"type\":\"delete\",\"path\":\"src/obsolete.js\"}]}\n${MARKER_END}`,
+    `Append exactly one machine-readable block using these markers when code changes are ready:\n${MARKER_START}\n{"summary":"short summary","operations":[{"type":"write","path":"src/example.js","content":"complete file content"},{"type":"delete","path":"src/obsolete.js"}]}\n${MARKER_END}`,
     "Do not put Markdown fences around the machine-readable block. Keep it as the final part of the response."
   ].join("\n")
 }
@@ -202,6 +210,11 @@ export const extractCodeChangePlan = (content, workspace) => {
       summary,
       status: "proposed",
       workspace: {
+        source: workspace.source || "local",
+        sourceAttachmentId: workspace.sourceAttachmentId || null,
+        sourceAttachmentIds: workspace.sourceAttachmentIds || [],
+        sourceAttachmentName: workspace.sourceAttachmentName || null,
+        sourceAttachmentNames: workspace.sourceAttachmentNames || [],
         rootName: workspace.rootName,
         activeFile: workspace.activeFile,
         branch: workspace.git?.branch || null,

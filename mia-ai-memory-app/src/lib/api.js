@@ -132,6 +132,10 @@ export const api = {
   deleteChatConversation: id => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
   sendChatMessage: (id, payload) => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(payload) }),
   reportChatCodeChange: (conversationId, messageId, payload) => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/code-change-result`, { method: "POST", body: JSON.stringify(payload) }),
+  exportChatCodeChange: async (conversationId, messageId, fallbackName = "solution.zip") => {
+    const response = await rawAdminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/code-change-export`, { headers: { Accept: "application/zip" } })
+    return { blob: await response.blob(), fileName: downloadName(response, fallbackName) }
+  },
   uploadChatAttachment: async (conversationId, file) => {
     const response = await rawAdminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(conversationId)}/attachments?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",

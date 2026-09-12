@@ -38,8 +38,38 @@ const memoryLabel = message => {
 
 const planStatus = message => message.metadata?.codeChangeResult?.status || message.metadata?.codeChangePlan?.status || "proposed"
 
+const CHAT_ZOOM_STEPS = [100, 110, 120, 130, 140]
+
+const loadChatZoom = () => {
+  if (typeof window === "undefined") return 110
+  try {
+    const value = Number(window.localStorage.getItem("ai-memory.chat.zoom"))
+    if (!Number.isFinite(value)) return 110
+    return CHAT_ZOOM_STEPS.reduce((best, step) => Math.abs(step - value) < Math.abs(best - value) ? step : best, 110)
+  } catch {
+    return 110
+  }
+}
+
+const buildChatMetrics = zoom => {
+  const factor = zoom / 100
+  const px = value => `${Math.round(value * factor * 10) / 10}px`
+  return {
+    "--chat-font-xs": px(9),
+    "--chat-font-sm": px(10),
+    "--chat-font-md": px(11),
+    "--chat-font-lg": px(12),
+    "--chat-font-body": px(14),
+    "--chat-font-title": px(15),
+    "--chat-control-height": px(34),
+    "--chat-avatar-size": px(36)
+  }
+}
+
+
 export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, ideLayout = "split", onIDELayoutChange, onOpenIDE, onCloseIDE }) {
   const [bootstrap, setBootstrap] = useState({ agents: [], models: [], conversations: [] })
+  const [chatZoom, setChatZoom] = useState(loadChatZoom)
   const [activeId, setActiveId] = useState("")
   const [conversation, setConversation] = useState(null)
   const [messages, setMessages] = useState([])
@@ -55,6 +85,8 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   const [error, setError] = useState("")
   const [dragging, setDragging] = useState(false)
   const [applyingId, setApplyingId] = useState("")
+  const [downloadingId, setDownloadingId] = useState("")
+  const [transferStatus, setTransferStatus] = useState("")
   const [codeNotice, setCodeNotice] = useState("")
   const fileInputRef = useRef(null)
   const composerRef = useRef(null)
@@ -130,6 +162,8 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     setFiles([])
     setPendingFiles([])
     setError("")
+    setDownloadingId("")
+    setTransferStatus("")
     setCodeNotice("")
     if (scope) refreshBootstrap().catch(err => setError(err.message))
   }, [scopeKey, refreshBootstrap])
@@ -162,6 +196,21 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [messages, sending, pendingPrompt, codeNotice])
+
+  const changeChatZoom = direction => {
+    setChatZoom(current => {
+      const index = CHAT_ZOOM_STEPS.indexOf(current)
+      const nextIndex = Math.min(CHAT_ZOOM_STEPS.length - 1, Math.max(0, index + direction))
+      return CHAT_ZOOM_STEPS[nextIndex]
+    })
+  }
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("ai-memory.chat.zoom", String(chatZoom))
+    } catch {
+    }
+  }, [chatZoom])
 
   const createConversation = async () => {
     if (!scope) return null
@@ -210,8 +259,12 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   }
 
   const addFiles = incoming => {
-    const zipFiles = [...incoming].filter(file => file.name.toLowerCase().endsWith(".zip"))
-    if (zipFiles.length !== incoming.length) setError("Somente arquivos .zip são aceitos como anexos do chat.")
+    const values = [...incoming]
+    const zipFiles = values.filter(file => file.name.toLowerCase().endsWith(".zip"))
+    const exceedsLimit = files.length + zipFiles.length > 12
+    if (zipFiles.length !== values.length) setError("Somente arquivos .zip são aceitos como anexos do chat.")
+    else if (exceedsLimit) setError("O chat aceita até 12 arquivos ZIP por mensagem.")
+    else setError("")
     setFiles(current => {
       const keys = new Set(current.map(file => `${file.name}:${file.size}:${file.lastModified}`))
       const next = [...current]
@@ -238,6 +291,10 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   const applyCodePlan = async (message, automatic = false) => {
     const plan = message?.metadata?.codeChangePlan
     if (!plan) return
+    if (plan.workspace?.source === "attachment") {
+      setCodeNotice("Este plano foi gerado a partir de um ZIP anexado. Baixe a solução ZIP para preservar o projeto local conectado.")
+      return
+    }
     setApplyingId(message.id)
     setError("")
     setCodeNotice("")
@@ -298,13 +355,17 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
       currentConversation = currentConversation || await createConversation()
       if (!currentConversation) throw new Error("Não foi possível criar a conversa.")
       const attachmentIds = []
-      for (const file of outgoingFiles) {
+      for (let index = 0; index < outgoingFiles.length; index += 1) {
+        const file = outgoingFiles[index]
+        setTransferStatus(`Lendo ZIP ${index + 1}/${outgoingFiles.length} · ${file.name}`)
         const result = await api.uploadChatAttachment(currentConversation.id, file)
         attachmentIds.push(result.attachment.id)
       }
-      const workspaceContext = workspace?.isReady ? await workspace.buildAgentContext(content) : null
+      if (outgoingFiles.length) setTransferStatus("ZIP analisado · montando contexto para o agente")
+      const workspaceContext = workspace?.isReady && !attachmentIds.length ? await workspace.buildAgentContext(content) : null
       const result = await api.sendChatMessage(currentConversation.id, { content, agentId, model, attachmentIds, workspaceContext })
-      if (workspace?.autoApply && result.assistantMessage?.metadata?.codeChangePlan) await applyCodePlan(result.assistantMessage, true)
+      const generatedPlan = result.assistantMessage?.metadata?.codeChangePlan
+      if (workspace?.autoApply && generatedPlan && generatedPlan.workspace?.source !== "attachment") await applyCodePlan(result.assistantMessage, true)
       else await loadConversation(currentConversation.id)
       await refreshBootstrap(currentConversation.id)
     } catch (err) {
@@ -319,6 +380,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     } finally {
       setPendingPrompt("")
       setPendingFiles([])
+      setTransferStatus("")
       setSending(false)
       window.requestAnimationFrame(() => composerRef.current?.focus())
     }
@@ -331,6 +393,21 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
       downloadBlob(await api.exportChatConversation(conversation.id, `${conversation.title}.zip`))
     } catch (err) {
       setError(err.message)
+    }
+  }
+
+  const downloadCodePlan = async message => {
+    const plan = message?.metadata?.codeChangePlan
+    if (!plan || !(plan.operations || []).some(operation => operation.type === "write" && typeof operation.content === "string")) return
+    setDownloadingId(message.id)
+    setError("")
+    try {
+      const rootName = plan.workspace?.rootName || conversation?.title || "solution"
+      downloadBlob(await api.exportChatCodeChange(message.conversationId || conversation?.id, message.id, `${rootName}-solution.zip`))
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setDownloadingId("")
     }
   }
 
@@ -368,7 +445,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   }
 
   return (
-    <section className={`chat-workspace${ideOpen ? " ide-companion" : ""}`}>
+    <section className={`chat-workspace${ideOpen ? " ide-companion" : ""}`} style={buildChatMetrics(chatZoom)}>
       <aside className="chat-sidebar">
         <div className="chat-sidebar-head">
           <div><span className="eyebrow">Memory-first chat</span><strong>Conversas</strong></div>
@@ -399,6 +476,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
             <label><span>Modelo</span><select value={model} onChange={event => setModel(event.target.value)} disabled={sending}>{selectedModels.length ? selectedModels.map(item => <option key={item.id} value={item.modelId}>{item.displayName}</option>) : <option value={model}>{model || "Sem modelo"}</option>}</select></label>
           </div>
           <div className="chat-toolbar-actions">
+            <div className="chat-zoom-control" aria-label="Escala visual do chat"><button onClick={() => changeChatZoom(-1)} disabled={chatZoom === CHAT_ZOOM_STEPS[0]} title="Diminuir escala do chat">−</button><button className="chat-zoom-value" onClick={() => setChatZoom(110)} title="Restaurar escala recomendada">{chatZoom}%</button><button onClick={() => changeChatZoom(1)} disabled={chatZoom === CHAT_ZOOM_STEPS[CHAT_ZOOM_STEPS.length - 1]} title="Aumentar escala do chat">+</button></div>
             <button className={`chat-ide-button${ideOpen ? " active" : ""}`} onClick={ideOpen ? onCloseIDE : onOpenIDE}><span>&lt;/&gt;</span>{workspace?.isReady ? workspace.rootName : "Abrir IDE"}</button>
             {ideOpen ? <button className="chat-ide-resize" onClick={cycleIDELayout} title="Alternar tamanho da IDE">{ideLayout === "compact" ? "▯" : ideLayout === "wide" ? "▰" : "◫"}</button> : null}
             {workspace?.isReady ? <button className={`chat-auto-apply${workspace.autoApply ? " active" : ""}`} onClick={() => workspace.setAutoApply(!workspace.autoApply)} title="Quando ativo, planos de código sem conflito são gravados automaticamente na pasta local"><i />Auto apply</button> : null}
@@ -414,6 +492,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
             <b>{selectedAgent?.name || "selecione um agente"}</b>
           </div>
           {codeNotice ? <div className="chat-code-notice"><span>✓</span>{codeNotice}<button onClick={onOpenIDE}>Ver na IDE</button></div> : null}
+          {transferStatus ? <div className="chat-transfer-status"><span className="chat-transfer-spinner" /><strong>{transferStatus}</strong><small>O ZIP é convertido em contexto seguro para qualquer agente.</small></div> : null}
           {error ? <div className="chat-error"><span>{error}</span>{error.includes("credencial") || error.includes("API key") || error.includes("repositoryUrl") ? <button onClick={onConfigure}>Abrir configuração</button> : error.includes("pasta") || error.includes("workspace") || error.includes("Conflito") ? <button onClick={onOpenIDE}>Abrir IDE</button> : null}</div> : null}
         </div>
 
@@ -439,15 +518,25 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
                 <div className="chat-message-body">
                   <header><strong>{message.role === "user" ? "Você" : message.agentName || "AI Memory"}</strong><span>{message.model || ""}</span><time>{formatWhen(message.createdAt)}</time></header>
                   <MessageContent content={message.content} plain={message.role === "user"} />
-                  {message.attachments?.length ? <div className="chat-message-files">{message.attachments.map(attachment => <button key={attachment.id} onClick={() => downloadAttachment(attachment)}><span>ZIP</span><strong>{attachment.fileName}</strong><small>{formatSize(attachment.sizeBytes)}</small><i>↓</i></button>)}</div> : null}
-                  {plan ? (
-                    <div className={`chat-code-plan ${status}`}>
-                      <div className="chat-code-plan-head"><span>&lt;/&gt;</span><div><strong>{plan.summary || "Alterações de código prontas"}</strong><small>{plan.operations?.length || 0} operação(ões) · {plan.workspace?.rootName || "workspace local"}{plan.workspace?.branch ? ` · ${plan.workspace.branch}` : ""}</small></div><i>{status === "applied" ? "APLICADO" : status === "conflict" ? "CONFLITO" : status === "failed" ? "FALHOU" : "PRONTO"}</i></div>
-                      <div className="chat-code-files">{(plan.operations || []).slice(0, 8).map((operation, index) => <span key={`${operation.path}:${index}`}><i>{operation.type === "delete" ? "−" : operation.expectedExists === false ? "+" : "~"}</i><strong>{operation.path}</strong></span>)}{plan.operations?.length > 8 ? <small>+ {plan.operations.length - 8} arquivos</small> : null}</div>
-                      {message.metadata?.codeChangeResult?.error ? <div className="chat-code-plan-error">{message.metadata.codeChangeResult.error}</div> : null}
-                      <div className="chat-code-plan-actions"><button onClick={onOpenIDE}>Abrir IDE</button>{status !== "applied" ? <button className="primary" onClick={() => applyCodePlan(message)} disabled={applyingId === message.id}>{applyingId === message.id ? "Aplicando…" : "Aplicar alterações"}</button> : <strong>✓ Gravado no projeto local</strong>}</div>
-                    </div>
-                  ) : null}
+                  {message.attachments?.length ? <div className="chat-message-files">{message.attachments.map(attachment => <button key={attachment.id} onClick={() => downloadAttachment(attachment)}><span>ZIP</span><strong>{attachment.fileName}</strong><small>{attachment.manifest?.length ? `${attachment.manifest.length} arquivos · ` : ""}{formatSize(attachment.sizeBytes)}</small><i>↓</i></button>)}</div> : null}
+                  {plan ? (() => {
+                    const fromAttachment = plan.workspace?.source === "attachment"
+                    const downloadable = (plan.operations || []).some(operation => operation.type === "write" && typeof operation.content === "string")
+                    const deleteCount = (plan.operations || []).filter(operation => operation.type === "delete").length
+                    return (
+                      <div className={`chat-code-plan ${status}`}>
+                        <div className="chat-code-plan-head"><span>&lt;/&gt;</span><div><strong>{plan.summary || "Alterações de código prontas"}</strong><small>{plan.operations?.length || 0} operação(ões) · {plan.workspace?.rootName || "workspace local"}{fromAttachment ? " · origem ZIP" : plan.workspace?.branch ? ` · ${plan.workspace.branch}` : ""}</small></div><i>{status === "applied" ? "APLICADO" : status === "conflict" ? "CONFLITO" : status === "failed" ? "FALHOU" : "PRONTO"}</i></div>
+                        <div className="chat-code-files">{(plan.operations || []).slice(0, 8).map((operation, index) => <span key={`${operation.path}:${index}`}><i>{operation.type === "delete" ? "−" : operation.expectedExists === false ? "+" : "~"}</i><strong>{operation.path}</strong></span>)}{plan.operations?.length > 8 ? <small>+ {plan.operations.length - 8} arquivos</small> : null}</div>
+                        {deleteCount ? <div className="chat-code-plan-hint">O ZIP contém somente arquivos criados/alterados. {deleteCount} exclusão(ões) ficam disponíveis para aplicação pela IDE.</div> : null}
+                        {message.metadata?.codeChangeResult?.error ? <div className="chat-code-plan-error">{message.metadata.codeChangeResult.error}</div> : null}
+                        <div className="chat-code-plan-actions">
+                          <button onClick={onOpenIDE}>Abrir IDE</button>
+                          {downloadable ? <button className="download" onClick={() => downloadCodePlan(message)} disabled={downloadingId === message.id}>{downloadingId === message.id ? "Gerando ZIP…" : "↓ Baixar solução ZIP"}</button> : null}
+                          {!fromAttachment && status !== "applied" ? <button className="primary" onClick={() => applyCodePlan(message)} disabled={applyingId === message.id}>{applyingId === message.id ? "Aplicando…" : "Aplicar alterações"}</button> : status === "applied" ? <strong>✓ Gravado no projeto local</strong> : fromAttachment ? <strong>ZIP pronto para download</strong> : null}
+                        </div>
+                      </div>
+                    )
+                  })() : null}
                   {message.role === "assistant" ? <footer><span>{memoryLabel(message)}</span><i className={message.metadata?.memoryCapture === "degraded" ? "degraded" : ""}>{message.metadata?.memoryCapture === "captured" ? "capturado no core" : message.metadata?.memoryCapture === "degraded" ? "core degradado" : "contexto aplicado"}</i></footer> : null}
                 </div>
               </article>
@@ -457,7 +546,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
           {sending && pendingPrompt ? (
             <article className="chat-message user pending">
               <div className="chat-message-avatar">YOU</div>
-              <div className="chat-message-body"><header><strong>Você</strong><span>enviando</span></header><MessageContent content={pendingPrompt} plain />{workspace?.isReady ? <div className="chat-workspace-pending"><span>&lt;/&gt;</span><strong>{workspace.rootName}</strong><small>código local incluído no contexto</small></div> : null}{pendingFiles.length ? <div className="chat-pending-files">{pendingFiles.map(file => <span key={`${file.name}:${file.size}`}>{file.name}</span>)}</div> : null}</div>
+              <div className="chat-message-body"><header><strong>Você</strong><span>enviando</span></header><MessageContent content={pendingPrompt} plain />{workspace?.isReady && !pendingFiles.length ? <div className="chat-workspace-pending"><span>&lt;/&gt;</span><strong>{workspace.rootName}</strong><small>código local incluído no contexto</small></div> : null}{pendingFiles.length ? <div className="chat-pending-files">{pendingFiles.map(file => <span key={`${file.name}:${file.size}`}>{file.name}</span>)}</div> : null}</div>
             </article>
           ) : null}
 
@@ -472,7 +561,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
 
         <div className={`chat-composer${dragging ? " dragging" : ""}`} onDragEnter={event => { event.preventDefault(); setDragging(true) }} onDragOver={event => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files) }}>
           {workspace?.isReady ? <div className="chat-local-context"><span>&lt;/&gt;</span><strong>{workspace.rootName}</strong>{gitLabel ? <i className="chat-local-branch">⑂ {gitLabel}</i> : null}<small>{workspace.activePath || "projeto conectado"}</small><button onClick={onOpenIDE}>IDE</button></div> : null}
-          {files.length ? <div className="chat-file-queue">{files.map((file, index) => <span key={`${file.name}:${file.size}:${file.lastModified}`}><i>ZIP</i><strong>{file.name}</strong><small>{formatSize(file.size)}</small><button onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></span>)}</div> : null}
+          {files.length ? <><div className="chat-zip-context-note"><span>ZIP</span><div><strong>{files.length} pacote{files.length > 1 ? "s" : ""} pronto{files.length > 1 ? "s" : ""} para análise</strong><small>O AI Memory lê o manifesto, ignora dependências/builds e usa o ZIP como fonte principal deste envio sem alterar automaticamente o projeto local.</small></div></div><div className="chat-file-queue">{files.map((file, index) => <span key={`${file.name}:${file.size}:${file.lastModified}`}><i>ZIP</i><strong>{file.name}</strong><small>{formatSize(file.size)}</small><button onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></span>)}</div></> : null}
           <div className="chat-compose-row">
             <input ref={fileInputRef} hidden type="file" accept=".zip,application/zip,application/x-zip-compressed" multiple onChange={event => { addFiles(event.target.files); event.target.value = "" }} />
             <button className="chat-attach" onClick={() => fileInputRef.current?.click()} disabled={sending} title="Anexar ZIP">+</button>

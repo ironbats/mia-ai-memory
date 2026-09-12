@@ -272,6 +272,12 @@ export const createServer = () => http.createServer(async (req, res) => {
       requireAdmin(req)
       return send(res, 200, await chatService.sendMessage(chatMessageMatch[1], await readJson(req, config.chatWorkspaceRequestMaxBytes)))
     }
+    const chatCodeChangeExportMatch = url.pathname.match(/^\/api\/v1\/cognitive\/chat\/conversations\/([^/]+)\/messages\/([^/]+)\/code-change-export$/)
+    if (chatCodeChangeExportMatch && req.method === "GET") {
+      requireAdmin(req)
+      const exported = await chatService.exportCodeChange(chatCodeChangeExportMatch[1], chatCodeChangeExportMatch[2])
+      return sendBinary(res, 200, exported.content, "application/zip", exported.fileName)
+    }
     const chatCodeChangeResultMatch = url.pathname.match(/^\/api\/v1\/cognitive\/chat\/conversations\/([^/]+)\/messages\/([^/]+)\/code-change-result$/)
     if (chatCodeChangeResultMatch && req.method === "POST") {
       requireAdmin(req)
