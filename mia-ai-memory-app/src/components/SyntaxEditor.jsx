@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react"
+import EditorFindBar from "./ide/EditorFindBar.jsx"
 import { getCompletions, wordPrefixAt } from "../lib/ideLanguageService.js"
 
 const MAX_HIGHLIGHT_CHARS = 360000
@@ -252,7 +253,8 @@ const tokenize = (text, language) => {
   return codeTokens(text, language)
 }
 
-export default function SyntaxEditor({ value, language, path, onChange, onSave, onCursorChange, revealLine = null, fontSize = 14 }) {
+export default function SyntaxEditor({ value, language, path, onChange, onSave, onCursorChange, revealLine = null, fontSize = 14, searchRequest = null }) {
+  const [findRequest, setFindRequest] = useState(null)
   const highlightRef = useRef(null)
   const lineRef = useRef(null)
   const textareaRef = useRef(null)
@@ -335,7 +337,55 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
     if (completionOpen) window.requestAnimationFrame(() => openCompletions(textarea, nextValue))
   }
 
+  const selectRange = (start, end, focus = true) => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    if (focus) textarea.focus()
+    textarea.setSelectionRange(start, end)
+    const before = textarea.value.slice(0, start)
+    const line = before.split("\n").length
+    const column = start - before.lastIndexOf("\n")
+    const lineHeight = fontSize * 1.55
+    textarea.scrollTop = Math.max(0, (line - 4) * lineHeight)
+    textarea.scrollLeft = Math.max(0, (column - 1) * fontSize * 0.62 - textarea.clientWidth / 2)
+    syncLayers(textarea)
+    updateCursor({ currentTarget: textarea })
+  }
+
+  const replaceRange = (start, end, replacement) => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    const previousFocus = document.activeElement
+    textarea.focus()
+    textarea.setSelectionRange(start, end)
+    // Native insertion preserves the textarea's undo history in Chrome/Edge.
+    const inserted = document.execCommand("insertText", false, replacement)
+    if (!inserted) onChange(`${value.slice(0, start)}${replacement}${value.slice(end)}`)
+    window.requestAnimationFrame(() => {
+      syncLayers(textarea)
+      updateCursor({ currentTarget: textarea })
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true })
+    })
+  }
+
+  const showFind = (replace = false) => {
+    const textarea = textareaRef.current
+    const selection = textarea ? value.slice(textarea.selectionStart, textarea.selectionEnd) : ""
+    setCompletionOpen(false)
+    setFindRequest(current => ({ replace, query: selection && !selection.includes("\n") ? selection : current?.query || "", nonce: Date.now() }))
+  }
+
+  useEffect(() => {
+    if (searchRequest) showFind(searchRequest.replace)
+  }, [searchRequest?.nonce])
+
   const handleKeyDown = event => {
+    if (event.isComposing || event.nativeEvent?.isComposing) return
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && ["f", "h"].includes(event.key.toLowerCase())) {
+      event.preventDefault()
+      showFind(event.key.toLowerCase() === "h")
+      return
+    }
     if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
       event.preventDefault()
       openCompletions(event.currentTarget)
@@ -361,7 +411,7 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
       setCompletionOpen(false)
       return
     }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "s") {
       event.preventDefault()
       onSave?.()
       return
@@ -385,18 +435,17 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
     if (!revealLine?.line || revealLine.path !== path) return
     const textarea = textareaRef.current
     if (!textarea) return
-    const targetLine = Math.max(1, Number(revealLine.line) || 1)
     const lines = value.split("\n")
+    const targetLine = Math.min(lines.length, Math.max(1, Number(revealLine.line) || 1))
     let offset = 0
-    for (let index = 0; index < Math.min(targetLine - 1, lines.length); index += 1) offset += lines[index].length + 1
-    textarea.focus()
-    textarea.setSelectionRange(offset, offset)
-    textarea.scrollTop = Math.max(0, (targetLine - 4) * fontSize * 1.55)
-    syncLayers(textarea)
-    updateCursor({ currentTarget: textarea })
+    for (let index = 0; index < targetLine - 1; index += 1) offset += lines[index].length + 1
+    offset += Math.min(lines[targetLine - 1].length, Math.max(0, Number(revealLine.column || 1) - 1))
+    selectRange(offset, Math.min(value.length, offset + (revealLine.length || 0)))
   }, [fontSize, path, revealLine?.nonce])
 
   return (
+    <div className="ide-editor-surface">
+      {findRequest ? <EditorFindBar value={value} request={findRequest} onSelect={selectRange} onReplace={replaceRange} onClose={() => { setFindRequest(null); textareaRef.current?.focus() }} /> : null}
     <div className="ide-syntax-shell">
       <pre ref={lineRef} className="ide-syntax-lines" aria-hidden="true">{lineNumbers}</pre>
       <div className="ide-syntax-editor">
@@ -407,6 +456,7 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
           {completionItems.map((item, index) => <button type="button" key={`${item.kind}:${item.label}`} className={index === completionIndex ? "active" : ""} onMouseDown={event => { event.preventDefault(); applyCompletion(item) }}><i>{item.kind === "keyword" ? "K" : "S"}</i><strong>{item.label}</strong><small>{item.kind}</small></button>)}
         </div> : null}
       </div>
+    </div>
     </div>
   )
 }

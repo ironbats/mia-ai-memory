@@ -11,7 +11,7 @@ const severityIcon = severity => severity === "error" ? "×" : severity === "war
 
 const lineText = value => String(value ?? "").split("\n")
 
-export default function IdeWorkbenchPanel({ activePanel, onPanelChange, onClose, workspace, analysis, onRevealLine, onResizeStart }) {
+export default function IdeWorkbenchPanel({ activePanel, onPanelChange, onClose, workspace, analysis, onRevealLine, resizeHandle }) {
   const [selectedChangePath, setSelectedChangePath] = useState("")
   const [terminalInput, setTerminalInput] = useState("")
   const [terminalEntries, setTerminalEntries] = useState(() => [
@@ -134,7 +134,7 @@ export default function IdeWorkbenchPanel({ activePanel, onPanelChange, onClose,
 
   return (
     <section className="ide-workbench">
-      <div className="ide-workbench-resizer" onPointerDown={onResizeStart} />
+      {resizeHandle}
       <header className="ide-workbench-tabs">
         <button className={activePanel === "problems" ? "active" : ""} onClick={() => onPanelChange("problems")}>Problems <span>{analysis.diagnostics.length}</span></button>
         <button className={activePanel === "outline" ? "active" : ""} onClick={() => onPanelChange("outline")}>Outline <span>{analysis.symbols.length}</span></button>

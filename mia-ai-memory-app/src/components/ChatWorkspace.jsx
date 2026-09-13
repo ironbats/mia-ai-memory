@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { api } from "../lib/api.js"
 import { confirmAction } from "../lib/dialogService.js"
+import ResizeHandle from "./layout/ResizeHandle.jsx"
+import useStoredPreference from "../hooks/useStoredPreference.js"
+import useElementSize from "../hooks/useElementSize.js"
 import MessageContent from "./MessageContent.jsx"
 
 const formatWhen = value => value ? new Date(value).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "agora"
@@ -70,6 +73,14 @@ const buildChatMetrics = zoom => {
 export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, ideLayout = "split", onIDELayoutChange, onOpenIDE, onCloseIDE }) {
   const [bootstrap, setBootstrap] = useState({ agents: [], models: [], conversations: [] })
   const [chatZoom, setChatZoom] = useState(loadChatZoom)
+  const [sidebarHidden, setSidebarHidden] = useStoredPreference("ai-memory.chat.sidebarHidden", false)
+  const [preferredSidebarWidth, setSidebarWidth] = useStoredPreference("ai-memory.chat.sidebarWidth", 220)
+  const [conversationQuery, setConversationQuery] = useState("")
+  const chatRef = useRef(null)
+  const { width: chatWidth } = useElementSize(chatRef, Boolean(scope))
+  const narrowChat = chatWidth > 0 && chatWidth < 620
+  const sidebarMax = Math.max(160, Math.min(340, chatWidth - 350))
+  const sidebarWidth = Math.max(160, Math.min(sidebarMax, preferredSidebarWidth))
   const [activeId, setActiveId] = useState("")
   const [conversation, setConversation] = useState(null)
   const [messages, setMessages] = useState([])
@@ -95,6 +106,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   const agents = bootstrap.agents || []
   const models = bootstrap.models || []
   const conversations = bootstrap.conversations || []
+  const filteredConversations = conversations.filter(item => `${item.title} ${item.lastAgentName || ""}`.toLowerCase().includes(conversationQuery.toLowerCase().trim()))
   const selectedAgent = agents.find(item => item.id === agentId) || null
   const selectedModels = useMemo(() => models.filter(item => item.agentId === agentId), [models, agentId])
   const lastAssistantMessage = useMemo(() => [...messages].reverse().find(item => item.role === "assistant") || null, [messages])
@@ -450,25 +462,28 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   }
 
   return (
-    <section className={`chat-workspace${ideOpen ? " ide-companion" : ""}`} style={buildChatMetrics(chatZoom)}>
-      <aside className="chat-sidebar">
+    <section ref={chatRef} className={`chat-workspace${ideOpen ? " ide-companion" : ""}${sidebarHidden ? " sidebar-hidden" : ""}${narrowChat ? " narrow-chat" : ""}`} style={{ ...buildChatMetrics(chatZoom), "--chat-sidebar-width": `${sidebarWidth}px` }}>
+      {!sidebarHidden ? <aside className="chat-sidebar" id="chat-conversations-pane">
         <div className="chat-sidebar-head">
           <div><span className="eyebrow">Memory-first chat</span><strong>Conversas</strong></div>
           <button className="chat-icon-button" onClick={newConversation} disabled={sending} title="Nova conversa">+</button>
         </div>
         <div className="chat-scope-chip"><span>escopo</span><strong>{scope.workspace}/{scope.project}</strong></div>
+        <div className="chat-conversation-search"><input aria-label="Buscar conversas" placeholder="Buscar conversas…" value={conversationQuery} onChange={event => setConversationQuery(event.target.value)} /></div>
         <div className="chat-conversation-list">
-          {conversations.map(item => (
+          {filteredConversations.map(item => (
             <button key={item.id} className={`chat-conversation-item${activeId === item.id ? " active" : ""}`} onClick={() => setActiveId(item.id)}>
               <span><strong>{item.title}</strong><small>{item.messageCount} mensagens · {formatWhen(item.lastMessageAt || item.createdAt)}</small></span>
               <i>{item.lastAgentName || "memory"}</i>
               <b onClick={event => removeConversation(event, item)} title="Excluir conversa">×</b>
             </button>
           ))}
+          {conversations.length > 0 && !filteredConversations.length ? <div className="chat-sidebar-empty">Nenhuma conversa encontrada.</div> : null}
           {!conversations.length ? <div className="chat-sidebar-empty"><strong>Nenhuma conversa.</strong><span>Crie uma ou simplesmente escreva abaixo.</span></div> : null}
         </div>
         <div className="chat-principle"><strong>Memória ≠ agente</strong><span>Você pode trocar o executor a qualquer turno sem reiniciar o contexto.</span></div>
-      </aside>
+      </aside> : null}
+      {!sidebarHidden && !narrowChat ? <ResizeHandle className="chat-sidebar-divider" label="Largura da lista de conversas" controls="chat-conversations-pane" value={sidebarWidth} min={160} max={sidebarMax} onChange={setSidebarWidth} onReset={() => setSidebarWidth(220)} /> : null}
 
       <div className="chat-main">
         <header className="chat-toolbar">
@@ -481,6 +496,8 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
             <label><span>Modelo</span><select value={model} onChange={event => setModel(event.target.value)} disabled={sending}>{selectedModels.length ? selectedModels.map(item => <option key={item.id} value={item.modelId}>{item.displayName}</option>) : <option value={model}>{model || "Sem modelo"}</option>}</select></label>
           </div>
           <div className="chat-toolbar-actions">
+            <button className="chat-sidebar-toggle" aria-expanded={!sidebarHidden} aria-controls="chat-conversations-pane" onClick={() => setSidebarHidden(value => !value)} title={sidebarHidden ? "Mostrar conversas" : "Recolher conversas"}>☰ Conversas</button>
+            {sidebarHidden ? <button className="chat-sidebar-toggle" onClick={newConversation} disabled={sending} title="Nova conversa">+ Nova</button> : null}
             <div className="chat-zoom-control" aria-label="Escala visual do chat"><button onClick={() => changeChatZoom(-1)} disabled={chatZoom === CHAT_ZOOM_STEPS[0]} title="Diminuir escala do chat">−</button><button className="chat-zoom-value" onClick={() => setChatZoom(110)} title="Restaurar escala recomendada">{chatZoom}%</button><button onClick={() => changeChatZoom(1)} disabled={chatZoom === CHAT_ZOOM_STEPS[CHAT_ZOOM_STEPS.length - 1]} title="Aumentar escala do chat">+</button></div>
             <button className={`chat-ide-button${ideOpen ? " active" : ""}`} onClick={ideOpen ? onCloseIDE : onOpenIDE}><span>&lt;/&gt;</span>{workspace?.isReady ? workspace.rootName : "Abrir IDE"}</button>
             {ideOpen ? <button className="chat-ide-resize" onClick={cycleIDELayout} title="Alternar tamanho da IDE">{ideLayout === "compact" ? "▯" : ideLayout === "wide" ? "▰" : "◫"}</button> : null}

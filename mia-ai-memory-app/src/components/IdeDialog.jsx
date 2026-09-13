@@ -1,7 +1,10 @@
 import React, { useEffect, useRef } from "react"
+import useDialogFocus from "../hooks/useDialogFocus.js"
 
 export default function IdeDialog({ open, title, description, confirmLabel = "Confirmar", cancelLabel = "Cancelar", tone = "default", value = "", placeholder = "", onValueChange, onConfirm, onCancel, error = "" }) {
   const inputRef = useRef(null)
+  const dialogRef = useRef(null)
+  useDialogFocus(dialogRef, open)
 
   useEffect(() => {
     if (!open) return
@@ -12,7 +15,6 @@ export default function IdeDialog({ open, title, description, confirmLabel = "Co
       }
     }
     window.addEventListener("keydown", handleKeyDown)
-    window.requestAnimationFrame(() => inputRef.current?.focus())
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [open, onCancel])
 
@@ -27,7 +29,7 @@ export default function IdeDialog({ open, title, description, confirmLabel = "Co
     <div className="ide-dialog-backdrop" role="presentation" onMouseDown={event => {
       if (event.target === event.currentTarget) onCancel?.()
     }}>
-      <form className={`ide-dialog tone-${tone}`} role="dialog" aria-modal="true" aria-label={title} onSubmit={submit}>
+      <form ref={dialogRef} className={`ide-dialog tone-${tone}`} role="dialog" aria-modal="true" aria-label={title} onSubmit={submit}>
         <div className="ide-dialog-mark">{tone === "danger" ? "!" : "◇"}</div>
         <div className="ide-dialog-copy">
           <span className="eyebrow">AI Memory IDE</span>

@@ -12,6 +12,8 @@ import OptimizationPanel from "./components/OptimizationPanel.jsx"
 import SearchExplain from "./components/SearchExplain.jsx"
 import { api } from "./lib/api.js"
 import useLocalWorkspace from "./hooks/useLocalWorkspace.js"
+import useWorkspaceLayout from "./hooks/useWorkspaceLayout.js"
+import ResizeHandle from "./components/layout/ResizeHandle.jsx"
 
 const tabs = [
   ["brain", "Neural Brain"],
@@ -59,7 +61,8 @@ export default function App() {
   const [memory, setMemory] = useState(null)
   const [memoryLoading, setMemoryLoading] = useState(false)
   const [ideOpen, setIdeOpen] = useState(false)
-  const [ideLayout, setIdeLayout] = useState("split")
+  const workspaceLayout = useWorkspaceLayout()
+  const { layout: ideLayout, selectLayout: setIdeLayout } = workspaceLayout
   const localWorkspace = useLocalWorkspace()
 
   const scopeKey = scope ? `${scope.workspace}/${scope.project}` : ""
@@ -262,7 +265,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className={`workspace-layout${ideOpen ? ` developer-mode ide-${ideLayout}` : ""}`}>
+      <main ref={workspaceLayout.containerRef} style={{ "--workspace-ide-share": `${workspaceLayout.value}fr`, "--workspace-chat-share": `${100 - workspaceLayout.value}fr` }} className={`workspace-layout${ideOpen ? ` developer-mode ide-${ideLayout}` : ""}`}>
         <div className="console-column">
         <section className="hero-row">
           <div>
@@ -329,10 +332,11 @@ export default function App() {
           </>
         )}
         </div>
-        <div className="code-ide-column" aria-label="AI Memory Developer Workspace">
-          <CodeWorkspace workspace={localWorkspace} layout={ideLayout} onLayoutChange={setIdeLayout} onClose={() => setIdeOpen(false)} />
+        <div id="developer-code-pane" className="code-ide-column" aria-label="AI Memory Developer Workspace">
+          <CodeWorkspace visible={ideOpen} workspace={localWorkspace} layout={ideLayout} onLayoutChange={setIdeLayout} onClose={() => setIdeOpen(false)} />
         </div>
-        <aside className="persistent-chat-column" aria-label="AI Memory Chat">
+        {ideOpen ? <ResizeHandle className="workspace-main-resizer" label="Proporção entre IDE e chat" controls="developer-code-pane developer-chat-pane" containerRef={workspaceLayout.containerRef} unit="%" value={workspaceLayout.value} min={workspaceLayout.min} max={workspaceLayout.max} onChange={workspaceLayout.setValue} onReset={workspaceLayout.reset} /> : null}
+        <aside id="developer-chat-pane" className="persistent-chat-column" aria-label="AI Memory Chat">
           <ChatWorkspace scope={scope} onConfigure={() => setTab("integrations")} workspace={localWorkspace} ideOpen={ideOpen} ideLayout={ideLayout} onIDELayoutChange={setIdeLayout} onOpenIDE={openDeveloperWorkspace} onCloseIDE={() => setIdeOpen(false)} />
         </aside>
       </main>
