@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { listWorkspaceProjects, readActiveWorkspaceProjectId, removeWorkspaceProject as removeWorkspaceProjectRecord, sameWorkspaceHandle, saveActiveWorkspaceProjectId, saveWorkspaceProject } from "../lib/workspaceProjectRegistry.js"
 
 const MAX_TREE_FILES = 5000
 const MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -138,11 +139,43 @@ export default function useLocalWorkspace() {
   const [gitDetached, setGitDetached] = useState(false)
   const [gitWorktree, setGitWorktree] = useState(false)
   const [sessionChanges, setSessionChanges] = useState([])
+  const [projects, setProjects] = useState([])
+  const [activeProjectId, setActiveProjectId] = useState("")
+  const [projectSwitching, setProjectSwitching] = useState(false)
+  const [projectRegistryReady, setProjectRegistryReady] = useState(false)
+  const [projectRegistryPersistent, setProjectRegistryPersistent] = useState(true)
+  const [workspaceBusy, setWorkspaceBusy] = useState(false)
   const fileHandlesRef = useRef(new Map())
   const directoryHandlesRef = useRef(new Map())
   const tabsRef = useRef([])
   const baselineRef = useRef(new Map())
   const sessionChangesRef = useRef([])
+  const projectsRef = useRef([])
+  const activeProjectIdRef = useRef("")
+  const projectSessionsRef = useRef(new Map())
+  const workspaceOperationsRef = useRef(0)
+  const projectTransitionRef = useRef(false)
+
+  const runWorkspaceOperation = useCallback(async operation => {
+    if (projectTransitionRef.current) throw new Error("Aguarde a troca de projeto terminar antes de executar esta ação.")
+    workspaceOperationsRef.current += 1
+    setWorkspaceBusy(true)
+    try {
+      return await operation()
+    } finally {
+      workspaceOperationsRef.current = Math.max(0, workspaceOperationsRef.current - 1)
+      if (!workspaceOperationsRef.current) setWorkspaceBusy(false)
+    }
+  }, [])
+
+  const commitProjects = useCallback(updater => {
+    const current = projectsRef.current
+    const next = typeof updater === "function" ? updater(current) : updater
+    const normalized = Array.isArray(next) ? next : []
+    projectsRef.current = normalized
+    setProjects(normalized)
+    return normalized
+  }, [])
 
   useEffect(() => {
     tabsRef.current = tabs
@@ -160,8 +193,7 @@ export default function useLocalWorkspace() {
     const changed = baseline.exists !== afterExists || baseline.content !== String(after ?? "")
     setSessionChanges(values => {
       const remaining = values.filter(item => item.path !== normalized)
-      if (!changed) return remaining
-      return [...remaining, {
+      const next = changed ? [...remaining, {
         path: normalized,
         before: baseline.content,
         beforeExists: baseline.exists,
@@ -169,11 +201,112 @@ export default function useLocalWorkspace() {
         afterExists,
         origin,
         updatedAt: new Date().toISOString()
-      }].sort((a, b) => a.path.localeCompare(b.path))
+      }].sort((a, b) => a.path.localeCompare(b.path)) : remaining
+      sessionChangesRef.current = next
+      return next
     })
   }, [])
 
-  const scan = useCallback(async (handle, resetWorkspace = false) => {
+  const captureActiveProject = useCallback(() => {
+    const projectId = activeProjectIdRef.current
+    if (!projectId || !rootHandle) return null
+    const snapshot = {
+      id: projectId,
+      handle: rootHandle,
+      rootName,
+      tree,
+      filePaths,
+      tabs,
+      activePath,
+      contextPaths,
+      gitRepository,
+      gitBranch,
+      gitHead,
+      gitDetached,
+      gitWorktree,
+      sessionChanges,
+      fileHandles: new Map(fileHandlesRef.current),
+      directoryHandles: new Map(directoryHandlesRef.current),
+      baseline: new Map(baselineRef.current)
+    }
+    projectSessionsRef.current.set(projectId, snapshot)
+    commitProjects(values => values.map(project => project.id === projectId ? {
+      ...project,
+      name: rootName || project.name,
+      fileCount: filePaths.length,
+      dirtyCount: tabs.filter(tab => tab.dirty).length,
+      gitRepository,
+      gitBranch,
+      loaded: true
+    } : project))
+    return snapshot
+  }, [activePath, commitProjects, contextPaths, filePaths, gitBranch, gitDetached, gitHead, gitRepository, gitWorktree, rootHandle, rootName, sessionChanges, tabs, tree])
+
+  const restoreWorkspaceSession = useCallback(snapshot => {
+    if (!snapshot?.handle) return false
+    fileHandlesRef.current = new Map(snapshot.fileHandles || [])
+    directoryHandlesRef.current = new Map(snapshot.directoryHandles || [["", snapshot.handle]])
+    baselineRef.current = new Map(snapshot.baseline || [])
+    tabsRef.current = Array.isArray(snapshot.tabs) ? snapshot.tabs : []
+    sessionChangesRef.current = Array.isArray(snapshot.sessionChanges) ? snapshot.sessionChanges : []
+    setRootHandle(snapshot.handle)
+    setRootName(snapshot.rootName || snapshot.handle.name || "workspace")
+    setTree(Array.isArray(snapshot.tree) ? snapshot.tree : [])
+    setFilePaths(Array.isArray(snapshot.filePaths) ? snapshot.filePaths : [])
+    setTabs(tabsRef.current)
+    setActivePath(snapshot.activePath || "")
+    setContextPaths(Array.isArray(snapshot.contextPaths) ? snapshot.contextPaths : [])
+    setGitRepository(snapshot.gitRepository === true)
+    setGitBranch(snapshot.gitBranch || "")
+    setGitHead(snapshot.gitHead || "")
+    setGitDetached(snapshot.gitDetached === true)
+    setGitWorktree(snapshot.gitWorktree === true)
+    setSessionChanges(sessionChangesRef.current)
+    setError("")
+    setWorkspaceSession(current => current + 1)
+    return true
+  }, [])
+
+  const clearWorkspace = useCallback(() => {
+    fileHandlesRef.current = new Map()
+    directoryHandlesRef.current = new Map()
+    baselineRef.current = new Map()
+    tabsRef.current = []
+    sessionChangesRef.current = []
+    setRootHandle(null)
+    setRootName("")
+    setTree([])
+    setFilePaths([])
+    setTabs([])
+    setActivePath("")
+    setContextPaths([])
+    setGitRepository(false)
+    setGitBranch("")
+    setGitHead("")
+    setGitDetached(false)
+    setGitWorktree(false)
+    setSessionChanges([])
+    setError("")
+    setWorkspaceSession(current => current + 1)
+  }, [])
+
+  const ensureDirectoryPermission = useCallback(async (handle, request = true) => {
+    if (!handle) return "denied"
+    let permission = "prompt"
+    if (typeof handle.queryPermission === "function") {
+      try {
+        permission = await handle.queryPermission({ mode: "readwrite" })
+      } catch {
+        permission = "prompt"
+      }
+    }
+    if (permission !== "granted" && request && typeof handle.requestPermission === "function") {
+      permission = await handle.requestPermission({ mode: "readwrite" })
+    }
+    return permission
+  }, [])
+
+  const scan = useCallback(async (handle, resetWorkspace = false, targetProjectId = activeProjectIdRef.current) => {
     if (!handle) return
     setScanning(true)
     setError("")
@@ -250,27 +383,210 @@ export default function useLocalWorkspace() {
         setActivePath(current => refreshedTabs.some(tab => tab.path === current) ? current : refreshedTabs[0]?.path || "")
         setContextPaths(current => current.filter(path => fileHandles.has(path)))
       }
+      if (targetProjectId) {
+        commitProjects(values => values.map(project => project.id === targetProjectId ? {
+          ...project,
+          name: handle.name || project.name,
+          fileCount: sortedPaths.length,
+          dirtyCount: resetWorkspace ? 0 : tabsRef.current.filter(tab => tab.dirty).length,
+          gitRepository: git.repository,
+          gitBranch: git.branch,
+          loaded: true,
+          permission: "granted"
+        } : project))
+      }
     } catch (scanError) {
       setError(scanError.message || String(scanError))
       throw scanError
     } finally {
       setScanning(false)
     }
-  }, [])
+  }, [commitProjects])
+
+  const switchProject = useCallback(async projectId => {
+    const targetId = String(projectId || "")
+    const target = projectsRef.current.find(project => project.id === targetId)
+    if (!target) throw new Error("Projeto local não encontrado na IDE.")
+    if (targetId === activeProjectIdRef.current && rootHandle) return target
+    if (workspaceOperationsRef.current) throw new Error("Aguarde a operação atual da IDE terminar antes de trocar de projeto.")
+    const previousId = activeProjectIdRef.current
+    const previousSnapshot = captureActiveProject()
+    projectTransitionRef.current = true
+    setProjectSwitching(true)
+    setError("")
+    try {
+      const permission = await ensureDirectoryPermission(target.handle, true)
+      commitProjects(values => values.map(project => project.id === targetId ? { ...project, permission } : project))
+      if (permission !== "granted") throw new Error(`Acesso de leitura e escrita ao projeto ${target.name} não foi autorizado.`)
+      activeProjectIdRef.current = targetId
+      setActiveProjectId(targetId)
+      saveActiveWorkspaceProjectId(targetId)
+      const snapshot = projectSessionsRef.current.get(targetId)
+      if (snapshot?.handle) restoreWorkspaceSession(snapshot)
+      else await scan(target.handle, true, targetId)
+      const lastOpenedAt = new Date().toISOString()
+      const persisted = { ...target, name: target.handle.name || target.name, lastOpenedAt, permission: "granted" }
+      commitProjects(values => values.map(project => project.id === targetId ? { ...project, ...persisted } : project))
+      saveWorkspaceProject(persisted).catch(() => setProjectRegistryPersistent(false))
+      return persisted
+    } catch (switchError) {
+      if (previousId && previousSnapshot?.handle) {
+        activeProjectIdRef.current = previousId
+        setActiveProjectId(previousId)
+        saveActiveWorkspaceProjectId(previousId)
+        restoreWorkspaceSession(previousSnapshot)
+      } else if (!previousId) {
+        activeProjectIdRef.current = ""
+        setActiveProjectId("")
+        saveActiveWorkspaceProjectId("")
+        clearWorkspace()
+      }
+      throw switchError
+    } finally {
+      projectTransitionRef.current = false
+      setProjectSwitching(false)
+    }
+  }, [captureActiveProject, clearWorkspace, commitProjects, ensureDirectoryPermission, restoreWorkspaceSession, rootHandle, scan])
 
   const selectDirectory = useCallback(async () => {
     if (!supported) throw new Error("Seu navegador não oferece File System Access API. Use Chrome ou Edge recente para editar arquivos locais.")
-    const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "ai-memory-local-workspace" })
-    const permission = await handle.requestPermission({ mode: "readwrite" })
-    if (permission !== "granted") throw new Error("Acesso de leitura e escrita à pasta não foi autorizado.")
-    await scan(handle, true)
-    setWorkspaceSession(current => current + 1)
-    return handle
-  }, [scan, supported])
+    if (!projectRegistryReady) throw new Error("Aguarde a IDE carregar o registro local de projetos antes de adicionar outra pasta.")
+    if (workspaceOperationsRef.current) throw new Error("Aguarde a operação atual da IDE terminar antes de adicionar outro projeto.")
+    projectTransitionRef.current = true
+    setProjectSwitching(true)
+    setError("")
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "ai-memory-local-workspace" })
+      const permission = await ensureDirectoryPermission(handle, true)
+      if (permission !== "granted") throw new Error("Acesso de leitura e escrita à pasta não foi autorizado.")
+      let existing = null
+      for (const project of projectsRef.current) {
+        if (await sameWorkspaceHandle(project.handle, handle)) {
+          existing = project
+          break
+        }
+      }
+      if (existing) {
+        projectTransitionRef.current = false
+        setProjectSwitching(false)
+        await switchProject(existing.id)
+        return existing.handle
+      }
+      captureActiveProject()
+      const now = new Date().toISOString()
+      const project = {
+        id: crypto.randomUUID(),
+        name: handle.name || "workspace",
+        handle,
+        createdAt: now,
+        lastOpenedAt: now,
+        permission: "granted",
+        fileCount: 0,
+        dirtyCount: 0,
+        gitRepository: false,
+        gitBranch: "",
+        loaded: false
+      }
+      commitProjects(values => [...values, project])
+      activeProjectIdRef.current = project.id
+      setActiveProjectId(project.id)
+      saveActiveWorkspaceProjectId(project.id)
+      saveWorkspaceProject(project).catch(() => setProjectRegistryPersistent(false))
+      await scan(handle, true, project.id)
+      return handle
+    } finally {
+      projectTransitionRef.current = false
+      setProjectSwitching(false)
+    }
+  }, [captureActiveProject, commitProjects, ensureDirectoryPermission, projectRegistryReady, scan, supported, switchProject])
 
-  const refresh = useCallback(async () => {
-    if (rootHandle) await scan(rootHandle)
-  }, [rootHandle, scan])
+  const removeProject = useCallback(async projectId => {
+    if (workspaceOperationsRef.current) throw new Error("Aguarde a operação atual da IDE terminar antes de remover um projeto.")
+    const targetId = String(projectId || "")
+    const currentProjects = projectsRef.current
+    const index = currentProjects.findIndex(project => project.id === targetId)
+    if (index < 0) return false
+    const wasActive = activeProjectIdRef.current === targetId
+    projectSessionsRef.current.delete(targetId)
+    const remaining = currentProjects.filter(project => project.id !== targetId)
+    commitProjects(remaining)
+    removeWorkspaceProjectRecord(targetId).catch(() => setProjectRegistryPersistent(false))
+    if (!wasActive) return true
+    activeProjectIdRef.current = ""
+    setActiveProjectId("")
+    saveActiveWorkspaceProjectId("")
+    clearWorkspace()
+    const next = remaining[Math.min(index, remaining.length - 1)] || remaining[0] || null
+    if (next) await switchProject(next.id)
+    return true
+  }, [clearWorkspace, commitProjects, switchProject])
+
+  useEffect(() => {
+    if (!supported) {
+      setProjectRegistryReady(true)
+      return undefined
+    }
+    let cancelled = false
+    const loadRegistry = async () => {
+      try {
+        const records = await listWorkspaceProjects()
+        if (cancelled) return
+        const ordered = [...records].sort((left, right) => String(right.lastOpenedAt || "").localeCompare(String(left.lastOpenedAt || "")))
+        const hydrated = []
+        for (const record of ordered) {
+          if (!record?.id || !record?.handle) continue
+          const permission = await ensureDirectoryPermission(record.handle, false)
+          hydrated.push({
+            ...record,
+            name: record.name || record.handle.name || "workspace",
+            permission,
+            fileCount: 0,
+            dirtyCount: 0,
+            gitRepository: false,
+            gitBranch: "",
+            loaded: false
+          })
+        }
+        if (cancelled) return
+        commitProjects(hydrated)
+        setProjectRegistryReady(true)
+        const rememberedId = readActiveWorkspaceProjectId()
+        const preferred = hydrated.find(project => project.id === rememberedId && project.permission === "granted") || hydrated.find(project => project.permission === "granted") || null
+        if (!preferred || cancelled) return
+        activeProjectIdRef.current = preferred.id
+        setActiveProjectId(preferred.id)
+        saveActiveWorkspaceProjectId(preferred.id)
+        projectTransitionRef.current = true
+        setProjectSwitching(true)
+        try {
+          await scan(preferred.handle, true, preferred.id)
+          const lastOpenedAt = new Date().toISOString()
+          const persisted = { ...preferred, lastOpenedAt }
+          commitProjects(values => values.map(project => project.id === preferred.id ? { ...project, lastOpenedAt } : project))
+          saveWorkspaceProject(persisted).catch(() => setProjectRegistryPersistent(false))
+        } finally {
+          projectTransitionRef.current = false
+          if (!cancelled) setProjectSwitching(false)
+        }
+      } catch {
+        if (!cancelled) {
+          setProjectRegistryPersistent(false)
+          setProjectRegistryReady(true)
+        }
+      }
+    }
+    loadRegistry()
+    return () => {
+      cancelled = true
+    }
+  }, [commitProjects, ensureDirectoryPermission, scan, supported])
+
+  const refresh = useCallback(async () => runWorkspaceOperation(async () => {
+    if (!rootHandle) return
+    const expectedProjectId = activeProjectId
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou antes da atualização da IDE.")
+    await scan(rootHandle)
+  }), [activeProjectId, rootHandle, runWorkspaceOperation, scan])
 
   useEffect(() => {
     if (!rootHandle) return undefined
@@ -295,16 +611,24 @@ export default function useLocalWorkspace() {
   }, [rootHandle])
 
   const readPath = useCallback(async path => {
+    const expectedProjectId = activeProjectId
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a leitura do arquivo.")
     const normalized = safeRelativePath(path)
     const handle = fileHandlesRef.current.get(normalized)
     if (!handle) throw new Error(`Arquivo não encontrado: ${normalized}`)
     const file = await handle.getFile()
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a leitura do arquivo.")
     if (file.size > MAX_FILE_BYTES) throw new Error(`Arquivo maior que ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB: ${normalized}`)
     if (await looksBinary(file)) throw new Error(`Arquivo binário não pode ser aberto no editor: ${normalized}`)
-    return file.text()
-  }, [])
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a leitura do arquivo.")
+    const content = await file.text()
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a leitura do arquivo.")
+    return content
+  }, [activeProjectId])
 
   const openFile = useCallback(async path => {
+    const expectedProjectId = activeProjectId
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou antes da abertura do arquivo.")
     const normalized = safeRelativePath(path)
     const current = tabsRef.current.find(tab => tab.path === normalized)
     if (current) {
@@ -312,24 +636,34 @@ export default function useLocalWorkspace() {
       return current
     }
     const content = await readPath(normalized)
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a abertura do arquivo.")
     if (!baselineRef.current.has(normalized)) baselineRef.current.set(normalized, { exists: true, content })
     const tab = { path: normalized, name: basename(normalized), content, savedContent: content, dirty: false, language: languageFor(normalized) }
-    setTabs(values => [...values, tab])
+    setTabs(values => {
+      const next = [...values, tab]
+      tabsRef.current = next
+      return next
+    })
     setActivePath(normalized)
     return tab
-  }, [readPath])
+  }, [activeProjectId, readPath])
 
   const updateContent = useCallback((path, content) => {
     const normalized = normalizePath(path)
     const current = tabsRef.current.find(tab => tab.path === normalized)
     const baseline = baselineRef.current.get(normalized) || { exists: true, content: current?.savedContent || "" }
     if (!baselineRef.current.has(normalized)) baselineRef.current.set(normalized, baseline)
-    setTabs(values => values.map(tab => tab.path === normalized ? { ...tab, content, dirty: content !== tab.savedContent } : tab))
+    setTabs(values => {
+      const next = values.map(tab => tab.path === normalized ? { ...tab, content, dirty: content !== tab.savedContent } : tab)
+      tabsRef.current = next
+      return next
+    })
     trackChange({ path: normalized, before: baseline.content, beforeExists: baseline.exists, after: content, afterExists: true, origin: "editor" })
   }, [trackChange])
 
   const getDirectoryForPath = useCallback(async (path, create = false) => {
     if (!rootHandle) throw new Error("Selecione uma pasta de projeto primeiro.")
+    if (activeProjectId && activeProjectIdRef.current !== activeProjectId) throw new Error("O projeto ativo mudou durante a operação de arquivos.")
     const normalized = normalizePath(path)
     if (!normalized) return rootHandle
     const cached = directoryHandlesRef.current.get(normalized)
@@ -342,7 +676,7 @@ export default function useLocalWorkspace() {
       directoryHandlesRef.current.set(current, directory)
     }
     return directory
-  }, [rootHandle])
+  }, [activeProjectId, rootHandle])
 
   const getFileHandle = useCallback(async (path, create = false) => {
     const normalized = safeRelativePath(path)
@@ -363,20 +697,32 @@ export default function useLocalWorkspace() {
     return normalized
   }, [getFileHandle])
 
-  const saveFile = useCallback(async path => {
+  const saveFile = useCallback(async path => runWorkspaceOperation(async () => {
+    const expectedProjectId = activeProjectId
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou antes de salvar o arquivo.")
     const normalized = normalizePath(path)
     const tab = tabsRef.current.find(item => item.path === normalized)
     if (!tab) return
     await writePath(normalized, tab.content)
-    setTabs(values => values.map(item => item.path === normalized ? { ...item, savedContent: item.content, dirty: false } : item))
-  }, [writePath])
+    setTabs(values => {
+      const next = values.map(item => item.path === normalized ? { ...item, savedContent: item.content, dirty: false } : item)
+      tabsRef.current = next
+      return next
+    })
+  }), [activeProjectId, runWorkspaceOperation, writePath])
 
-  const saveAll = useCallback(async () => {
+  const saveAll = useCallback(async () => runWorkspaceOperation(async () => {
+    const expectedProjectId = activeProjectId
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou antes de salvar os arquivos.")
     const dirty = tabsRef.current.filter(tab => tab.dirty)
     for (const tab of dirty) await writePath(tab.path, tab.content)
-    if (dirty.length) setTabs(values => values.map(tab => tab.dirty ? { ...tab, savedContent: tab.content, dirty: false } : tab))
+    if (dirty.length) setTabs(values => {
+      const next = values.map(tab => tab.dirty ? { ...tab, savedContent: tab.content, dirty: false } : tab)
+      tabsRef.current = next
+      return next
+    })
     return dirty.length
-  }, [writePath])
+  }), [activeProjectId, runWorkspaceOperation, writePath])
 
   const closeTab = useCallback(path => {
     const normalized = normalizePath(path)
@@ -388,12 +734,15 @@ export default function useLocalWorkspace() {
     setTabs(values => {
       const index = values.findIndex(tab => tab.path === normalized)
       const next = values.filter(tab => tab.path !== normalized)
+      tabsRef.current = next
       setActivePath(active => active === normalized ? (next[Math.max(0, index - 1)]?.path || next[0]?.path || "") : active)
       return next
     })
   }, [trackChange])
 
-  const createFile = useCallback(async path => {
+  const createFile = useCallback(async path => runWorkspaceOperation(async () => {
+    const expectedProjectId = activeProjectId
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou antes da criação do arquivo.")
     const normalized = safeRelativePath(path)
     let exists = false
     try {
@@ -408,16 +757,19 @@ export default function useLocalWorkspace() {
     trackChange({ path: normalized, before: "", beforeExists: false, after: "", afterExists: true, origin: "create" })
     await scan(rootHandle)
     await openFile(normalized)
-  }, [getFileHandle, openFile, rootHandle, scan, trackChange, writePath])
+  }), [activeProjectId, getFileHandle, openFile, rootHandle, runWorkspaceOperation, scan, trackChange, writePath])
 
   const toggleContext = useCallback(path => {
     const normalized = normalizePath(path)
     setContextPaths(values => values.includes(normalized) ? values.filter(item => item !== normalized) : [...values, normalized].slice(-MAX_CONTEXT_FILES))
   }, [])
 
-  const buildAgentContext = useCallback(async prompt => {
+  const buildAgentContext = useCallback(async prompt => runWorkspaceOperation(async () => {
     if (!rootHandle) return null
+    const expectedProjectId = activeProjectId || activeProjectIdRef.current
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou antes da preparação do contexto. Envie a solicitação novamente no projeto selecionado.")
     await saveAll()
+    if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a preparação do contexto. Envie a solicitação novamente no projeto selecionado.")
     const tokens = tokenize(prompt)
     const priority = []
     const add = path => {
@@ -457,6 +809,7 @@ export default function useLocalWorkspace() {
     }
 
     return {
+      projectId: expectedProjectId || null,
       rootName,
       activeFile: activePath || null,
       git: {
@@ -471,7 +824,7 @@ export default function useLocalWorkspace() {
       files,
       stats: { fileCount: filePaths.length, contextFileCount: files.length, contextBytes: totalBytes }
     }
-  }, [activePath, contextPaths, filePaths, gitBranch, gitDetached, gitHead, gitRepository, gitWorktree, readPath, rootHandle, rootName, saveAll])
+  }), [activePath, activeProjectId, contextPaths, filePaths, gitBranch, gitDetached, gitHead, gitRepository, gitWorktree, readPath, rootHandle, rootName, runWorkspaceOperation, saveAll])
 
   const removePath = useCallback(async path => {
     const normalized = safeRelativePath(path)
@@ -493,8 +846,21 @@ export default function useLocalWorkspace() {
     }
   }, [getFileHandle])
 
-  const applyChangePlan = useCallback(async plan => {
+  const applyChangePlan = useCallback(async plan => runWorkspaceOperation(async () => {
     if (!rootHandle) throw new Error("Selecione a pasta do projeto antes de aplicar alterações.")
+    if (!plan?.workspace?.projectId && projectsRef.current.length > 1) {
+      const projectError = new Error("Este plano foi gerado antes do suporte multi-projeto e não possui identidade de workspace. Gere a alteração novamente no projeto ativo para aplicar com segurança.")
+      projectError.code = "WORKSPACE_CONFLICT"
+      projectError.conflicts = [{ path: "workspace", expected: activeProjectIdRef.current || "identified-project", actual: "legacy-plan-without-project-id" }]
+      throw projectError
+    }
+    if (plan?.workspace?.projectId && activeProjectIdRef.current && plan.workspace.projectId !== activeProjectIdRef.current) {
+      const target = projectsRef.current.find(project => project.id === plan.workspace.projectId)
+      const projectError = new Error(`Este plano pertence ao projeto ${target?.name || plan.workspace.rootName || "selecionado anteriormente"}. Selecione esse projeto na IDE antes de aplicar.`)
+      projectError.code = "WORKSPACE_CONFLICT"
+      projectError.conflicts = [{ path: "workspace", expected: plan.workspace.projectId, actual: activeProjectIdRef.current }]
+      throw projectError
+    }
     if (plan?.workspace?.branch && gitBranch && plan.workspace.branch !== gitBranch) {
       const branchError = new Error(`Conflito de branch: o plano foi gerado em ${plan.workspace.branch}, mas o projeto está em ${gitBranch}. Atualize o contexto antes de aplicar.`)
       branchError.code = "WORKSPACE_CONFLICT"
@@ -590,17 +956,35 @@ export default function useLocalWorkspace() {
       const content = await readPath(tab.path)
       nextTabs.push({ ...tab, content, savedContent: content, dirty: false })
     }
+    tabsRef.current = nextTabs
     setTabs(nextTabs)
     setActivePath(current => nextTabs.some(tab => tab.path === current) ? current : nextTabs[0]?.path || "")
-    return { status: "applied", workspace: rootName, branch: gitBranch || null, files: applied, appliedAt: new Date().toISOString() }
-  }, [gitBranch, readCurrentDisk, readPath, removePath, rootHandle, rootName, scan, trackChange, writePath])
+    return { status: "applied", projectId: activeProjectIdRef.current || null, workspace: rootName, branch: gitBranch || null, files: applied, appliedAt: new Date().toISOString() }
+  }), [gitBranch, readCurrentDisk, readPath, removePath, rootHandle, rootName, runWorkspaceOperation, scan, trackChange, writePath])
 
   const activeTab = useMemo(() => tabs.find(tab => tab.path === activePath) || null, [activePath, tabs])
   const dirtyCount = useMemo(() => tabs.filter(tab => tab.dirty).length, [tabs])
+  const projectItems = useMemo(() => projects.map(project => project.id === activeProjectId ? {
+    ...project,
+    name: rootName || project.name,
+    fileCount: filePaths.length,
+    dirtyCount,
+    gitRepository,
+    gitBranch,
+    loaded: Boolean(rootHandle)
+  } : project), [activeProjectId, dirtyCount, filePaths.length, gitBranch, gitRepository, projects, rootHandle, rootName])
+  const activeProject = useMemo(() => projectItems.find(project => project.id === activeProjectId) || null, [activeProjectId, projectItems])
 
   return {
     supported,
     isReady: Boolean(rootHandle),
+    projects: projectItems,
+    activeProjectId,
+    activeProject,
+    projectSwitching,
+    projectRegistryReady,
+    projectRegistryPersistent,
+    workspaceBusy,
     rootName,
     tree,
     filePaths,
@@ -622,6 +1006,8 @@ export default function useLocalWorkspace() {
     sessionChanges,
     setAutoApply,
     selectDirectory,
+    switchProject,
+    removeProject,
     refresh,
     readPath,
     openFile,

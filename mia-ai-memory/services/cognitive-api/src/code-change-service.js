@@ -40,6 +40,8 @@ export const normalizeWorkspaceContext = input => {
   if (!input || typeof input !== "object") return null
   const rootName = limitedText(input.rootName, 180, "workspace root name").trim()
   if (!rootName) return null
+  const rawProjectId = limitedText(input.projectId || "", 120, "workspace project id").trim()
+  const projectId = /^[A-Za-z0-9_-]{1,120}$/.test(rawProjectId) ? rawProjectId : null
   const rawManifest = Array.isArray(input.manifest) ? input.manifest : []
   const manifest = []
   const manifestSet = new Set()
@@ -100,6 +102,7 @@ export const normalizeWorkspaceContext = input => {
     sourceAttachmentIds: [],
     sourceAttachmentName: null,
     sourceAttachmentNames: [],
+    projectId,
     rootName,
     activeFile,
     git,
@@ -123,7 +126,7 @@ export const workspacePromptSection = workspace => {
   const attachment = workspace.source === "attachment"
   return [
     `${attachment ? "ATTACHED ZIP WORKSPACE" : "LOCAL WORKSPACE"} ${workspace.rootName}`,
-    ...(attachment ? [`Source attachment${workspace.sourceAttachmentNames?.length > 1 ? "s" : ""}: ${workspace.sourceAttachmentNames?.length ? workspace.sourceAttachmentNames.join(", ") : workspace.sourceAttachmentName || "ZIP attachment"}`] : [`Active file: ${workspace.activeFile || "none"}`, `Git repository: ${workspace.git ? "yes" : "no"}`]),
+    ...(attachment ? [`Source attachment${workspace.sourceAttachmentNames?.length > 1 ? "s" : ""}: ${workspace.sourceAttachmentNames?.length ? workspace.sourceAttachmentNames.join(", ") : workspace.sourceAttachmentName || "ZIP attachment"}`] : [`Workspace identity: ${workspace.projectId || "legacy-local-workspace"}`, `Active file: ${workspace.activeFile || "none"}`, `Git repository: ${workspace.git ? "yes" : "no"}`]),
     ...(!attachment && workspace.git ? [`Git branch: ${workspace.git.branch || (workspace.git.detached ? "detached HEAD" : "unknown")}`, `Git HEAD: ${workspace.git.head || "unknown"}`] : []),
     `Project files: ${workspace.stats.fileCount}${workspace.manifestTruncated ? "+" : ""}`,
     "PROJECT MANIFEST",
@@ -215,6 +218,7 @@ export const extractCodeChangePlan = (content, workspace) => {
         sourceAttachmentIds: workspace.sourceAttachmentIds || [],
         sourceAttachmentName: workspace.sourceAttachmentName || null,
         sourceAttachmentNames: workspace.sourceAttachmentNames || [],
+        projectId: workspace.projectId || null,
         rootName: workspace.rootName,
         activeFile: workspace.activeFile,
         branch: workspace.git?.branch || null,

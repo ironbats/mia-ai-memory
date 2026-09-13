@@ -304,6 +304,11 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
         setCodeNotice("Projeto local conectado. Confirme a pasta e clique em Aplicar alterações novamente.")
         return
       }
+      if (!plan.workspace?.projectId && (workspace.projects?.length || 0) > 1) throw new Error("Este plano foi criado antes do suporte multi-projeto. Gere a alteração novamente no projeto ativo para aplicar com segurança.")
+      if (plan.workspace?.projectId && workspace.activeProjectId && plan.workspace.projectId !== workspace.activeProjectId) {
+        const targetProject = workspace.projects?.find(project => project.id === plan.workspace.projectId)
+        throw new Error(`O plano foi gerado para o projeto “${targetProject?.name || plan.workspace.rootName || "anterior"}”. Selecione esse projeto na IDE antes de aplicar as alterações.`)
+      }
       if (plan.workspace?.rootName && workspace.rootName !== plan.workspace.rootName) throw new Error(`O plano foi gerado para “${plan.workspace.rootName}”. A pasta aberta é “${workspace.rootName}”.`)
       const result = await workspace.applyChangePlan(plan)
       const reported = await reportCodeResult(message.conversationId || conversation?.id, message.id, result)

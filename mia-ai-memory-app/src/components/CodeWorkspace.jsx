@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react"
 import SyntaxEditor from "./SyntaxEditor.jsx"
 import IdeDialog from "./IdeDialog.jsx"
 import IdeWorkbenchPanel from "./IdeWorkbenchPanel.jsx"
+import ProjectSwitcher from "./ProjectSwitcher.jsx"
 import { analyzeDocument } from "../lib/ideLanguageService.js"
 import { confirmAction } from "../lib/dialogService.js"
 
@@ -183,20 +184,64 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   }
 
   const chooseDirectory = async () => {
-    const hasUnsavedChanges = workspace.isReady && workspace.dirtyCount > 0
     const confirmed = await confirmAction({
-      tone: hasUnsavedChanges ? "danger" : "secure",
-      title: hasUnsavedChanges ? "Trocar o projeto local?" : workspace.isReady ? "Selecionar outro projeto local?" : "Abrir projeto local com acesso de edição?",
-      description: hasUnsavedChanges
-        ? `${workspace.dirtyCount} arquivo(s) têm alterações não salvas. Ao continuar, o navegador abrirá o seletor seguro de pasta e poderá solicitar novamente acesso de edição.`
-        : workspace.isReady
-          ? "O navegador abrirá o seletor seguro de pasta. O projeto atual será substituído na IDE somente depois que você escolher e autorizar a nova pasta."
-          : "A IDE precisa de leitura e escrita para salvar arquivos e aplicar alterações do agente. Depois desta confirmação, Chrome ou Edge exibirá a própria permissão de segurança do navegador.",
-      detail: "A permissão final de arquivos é uma camada de segurança do próprio navegador e não pode ser estilizada pela aplicação.",
-      confirmLabel: hasUnsavedChanges ? "Continuar e trocar pasta" : workspace.isReady ? "Selecionar outra pasta" : "Continuar e selecionar pasta"
+      tone: "secure",
+      title: workspace.projects?.length ? "Adicionar outro projeto à IDE?" : "Adicionar projeto local à IDE?",
+      description: workspace.isReady
+        ? `O projeto ${workspace.rootName} continuará disponível. Depois de autorizar outra pasta, você poderá alternar entre os projetos pelo seletor da IDE sem perder abas ou alterações não salvas da sessão.`
+        : "A IDE precisa de leitura e escrita para salvar arquivos e aplicar alterações do agente. Depois desta confirmação, Chrome ou Edge exibirá a própria permissão de segurança do navegador.",
+      detail: "A pasta não é enviada integralmente ao servidor. O registro dos projetos fica no navegador e a permissão final de arquivos continua sob controle do Chrome ou Edge.",
+      confirmLabel: "Selecionar pasta do projeto"
     })
     if (!confirmed) return
     await selectDirectoryNow()
+  }
+
+  const changeProject = async projectId => {
+    if (!projectId || projectId === workspace.activeProjectId) return true
+    const target = workspace.projects?.find(project => project.id === projectId)
+    if (target?.permission !== "granted") {
+      const confirmed = await confirmAction({
+        tone: "secure",
+        title: `Reconectar ${target.name}?`,
+        description: "O projeto já está registrado na IDE, mas o navegador precisa renovar a autorização de leitura e escrita antes de reabri-lo.",
+        detail: "Depois desta confirmação, Chrome ou Edge poderá exibir a permissão nativa de segurança da pasta.",
+        confirmLabel: "Reconectar projeto"
+      })
+      if (!confirmed) return false
+    }
+    setLocalError("")
+    try {
+      await workspace.switchProject(projectId)
+      return true
+    } catch (error) {
+      if (error?.name !== "AbortError") setLocalError(error.message || String(error))
+      return false
+    }
+  }
+
+  const forgetProject = async project => {
+    const target = project || workspace.activeProject
+    if (!target?.id) return false
+    const dirtyCount = Number(target.dirtyCount || (target.id === workspace.activeProjectId ? workspace.dirtyCount : 0))
+    const confirmed = await confirmAction({
+      tone: dirtyCount ? "danger" : "default",
+      title: `Remover ${target.name} da IDE?`,
+      description: dirtyCount
+        ? `${dirtyCount} arquivo(s) têm alterações não salvas no editor. Remover o projeto descartará somente esse estado não salvo; nenhum arquivo da pasta local será apagado.`
+        : "O projeto será removido da lista da IDE, mas nenhum arquivo da pasta local será apagado. Você poderá adicioná-lo novamente quando quiser.",
+      detail: "Esta ação remove apenas o vínculo local armazenado pelo AI Memory neste navegador.",
+      confirmLabel: "Remover da IDE"
+    })
+    if (!confirmed) return false
+    setLocalError("")
+    try {
+      await workspace.removeProject(target.id)
+      return true
+    } catch (error) {
+      setLocalError(error.message || String(error))
+      return false
+    }
   }
 
   const requestCreateFile = () => setDialog({
@@ -260,7 +305,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
     { id: "new-file", label: "File: New File", detail: "Criar arquivo no projeto atual", shortcut: "", run: requestCreateFile },
     { id: "save-all", label: "File: Save All", detail: `${workspace.dirtyCount} arquivo(s) pendente(s)`, shortcut: "Ctrl+S", run: () => workspace.saveAll().catch(error => setLocalError(error.message || String(error))) },
     { id: "refresh", label: "Workspace: Refresh", detail: "Reindexar árvore, Git e arquivos", shortcut: "", run: () => workspace.refresh().catch(error => setLocalError(error.message || String(error))) },
-    { id: "change-folder", label: "Workspace: Change Folder", detail: "Selecionar outro projeto local", shortcut: "", run: chooseDirectory },
+    { id: "add-project", label: "Workspace: Add Project", detail: `${workspace.projects?.length || 0} projeto(s) disponível(is) na IDE`, shortcut: "", run: chooseDirectory },
     { id: "changes", label: "View: Source Control / Changes", detail: `${workspace.sessionChanges?.length || 0} alteração(ões) da sessão`, shortcut: "Ctrl+Shift+G", run: () => openPanel("changes") },
     { id: "problems", label: "View: Problems", detail: `${analysis.diagnostics.length} diagnóstico(s) local(is)`, shortcut: "Ctrl+Shift+M", run: () => openPanel("problems") },
     { id: "outline", label: "View: Outline / AST", detail: `${analysis.symbols.length} símbolo(s) detectado(s)`, shortcut: "Ctrl+Shift+O", run: () => openPanel("outline") },
@@ -497,16 +542,16 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       <header className="ide-topbar">
         <div className="ide-title">
           <span className="ide-logo">&lt;/&gt;</span>
-          <div><span className="eyebrow">Developer Workspace</span><strong>{workspace.isReady ? workspace.rootName : "Nenhum projeto local"}</strong></div>
+          <div><span className="eyebrow">Developer Workspace</span><strong>{workspace.isReady ? workspace.rootName : "Nenhum projeto ativo"}</strong></div>
           {workspace.isReady ? <span className="ide-write-status"><i />read/write</span> : null}
           {workspace.isReady && workspace.gitRepository ? <button className={`ide-git-branch${workspace.gitDetached ? " detached" : ""}`} onClick={() => openPanel("changes")} title={workspace.gitHead ? `HEAD ${workspace.gitHead}` : "Repositório Git detectado"}><i>⑂</i><strong>{workspace.gitBranch || workspace.gitHeadShort || "Git"}</strong>{workspace.gitHeadShort ? <small>{workspace.gitHeadShort}</small> : null}</button> : null}
+          <ProjectSwitcher workspace={workspace} onAddProject={chooseDirectory} onSelectProject={changeProject} onRemoveProject={forgetProject} />
         </div>
         <div className="ide-toolbar-actions">
           {workspace.isReady ? <button onClick={openQuick} title="Quick Open · Ctrl/Cmd+P">⌕ Arquivos</button> : null}
           {workspace.isReady ? <button onClick={openCommandPalette} title="Command Palette · Ctrl/Cmd+Shift+P">⌘ Comandos</button> : null}
-          <button onClick={chooseDirectory}>{workspace.isReady ? "Trocar pasta" : "Selecionar pasta"}</button>
-          {workspace.isReady ? <button onClick={() => workspace.refresh().catch(error => setLocalError(error.message || String(error)))} disabled={workspace.scanning}>{workspace.scanning ? "Atualizando…" : "↻"}</button> : null}
-          {workspace.dirtyCount ? <button className="accent" onClick={() => workspace.saveAll().catch(error => setLocalError(error.message || String(error)))}>Salvar · {workspace.dirtyCount}</button> : null}
+          {workspace.isReady ? <button onClick={() => workspace.refresh().catch(error => setLocalError(error.message || String(error)))} disabled={workspace.scanning || workspace.projectSwitching || workspace.workspaceBusy}>{workspace.scanning ? "Atualizando…" : "↻"}</button> : null}
+          {workspace.dirtyCount ? <button className="accent" onClick={() => workspace.saveAll().catch(error => setLocalError(error.message || String(error)))} disabled={workspace.projectSwitching || workspace.workspaceBusy}>Salvar · {workspace.dirtyCount}</button> : null}
           <div className="ide-zoom-control" aria-label="Escala visual da IDE">
             <button onClick={() => changeIdeZoom(-1)} disabled={ideZoom === IDE_ZOOM_STEPS[0]} title="Diminuir escala da IDE · Ctrl/Cmd+Alt+-">−</button>
             <button className="ide-zoom-value" onClick={resetIdeZoom} title="Restaurar 100% · Ctrl/Cmd+Alt+0">{ideZoom}%</button>
@@ -528,14 +573,14 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
           <span className="ide-empty-mark">&lt;/&gt;</span>
           <span className="eyebrow">Local workspace</span>
           <h2>Código, memória e agente.<br /><em>No mesmo fluxo.</em></h2>
-          <p>Selecione a raiz do projeto para editar arquivos localmente. A árvore inicia recolhida, o Git é detectado sem expor .git e o chat permanece lado a lado com a IDE.</p>
-          <button className="primary-button" onClick={chooseDirectory}>Selecionar projeto local</button>
-          <small>.git, dependências, binários, chaves e arquivos .env permanecem fora do contexto enviado ao agente.</small>
+          <p>{workspace.projects?.length ? "Selecione no topo um projeto já adicionado ou conecte outra pasta. Cada projeto mantém suas próprias abas, contexto, alterações da sessão e estado de Git enquanto você alterna entre eles." : "Selecione a raiz do primeiro projeto para editar arquivos localmente. Depois você poderá adicionar quantos projetos precisar e alternar entre eles sem substituir o workspace atual."}</p>
+          <button className="primary-button" onClick={chooseDirectory} disabled={!workspace.projectRegistryReady}>{workspace.projectRegistryReady ? workspace.projects?.length ? "Adicionar outro projeto" : "Adicionar primeiro projeto" : "Carregando projetos…"}</button>
+          <small>{workspace.projectRegistryPersistent ? ".git, dependências, binários, chaves e arquivos .env permanecem fora do contexto enviado ao agente. A lista de projetos fica registrada neste navegador." : "A sessão multi-projeto está ativa, mas o navegador não permitiu persistir a lista localmente."}</small>
         </div>
       ) : (
         <div className="ide-body">
           <aside className="ide-explorer">
-            <div className="ide-explorer-head"><div><span>Explorer</span><strong>{workspace.rootName}</strong>{workspace.gitRepository ? <button onClick={() => openPanel("changes")}><i>⑂</i>{workspace.gitBranch || workspace.gitHeadShort || "Git"}</button> : null}</div><button onClick={requestCreateFile} title="Novo arquivo">+</button></div>
+            <div className="ide-explorer-head"><div><span>Explorer</span><strong>{workspace.rootName}</strong>{workspace.gitRepository ? <button onClick={() => openPanel("changes")}><i>⑂</i>{workspace.gitBranch || workspace.gitHeadShort || "Git"}</button> : null}</div><button onClick={requestCreateFile} title="Novo arquivo" disabled={workspace.projectSwitching || workspace.workspaceBusy}>+</button></div>
             <div className="ide-search"><span>⌕</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Filtrar arquivos…" /></div>
             <div className="ide-tree-controls">
               <button onClick={collapseAll} disabled={!expandedPaths.size}><span>−</span>Recolher</button>
@@ -573,7 +618,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
                     <button className={workbenchPanel === "changes" ? "active" : ""} onClick={() => openPanel("changes")} title="Source Control / Diff">⑂ {workspace.sessionChanges?.length || 0}</button>
                     <button className={workbenchPanel === "terminal" ? "active" : ""} onClick={() => openPanel("terminal")} title="Workspace Terminal">›_</button>
                     <button className={workspace.contextPaths.includes(active.path) ? "active" : ""} onClick={() => workspace.toggleContext(active.path)}>{workspace.contextPaths.includes(active.path) ? "● Contexto" : "○ Fixar"}</button>
-                    <button onClick={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} disabled={!active.dirty}>Salvar</button>
+                    <button onClick={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} disabled={!active.dirty || workspace.projectSwitching || workspace.workspaceBusy}>Salvar</button>
                   </div>
                 </div>
                 <SyntaxEditor key={active.path} value={active.content} language={active.language} path={active.path} onChange={content => workspace.updateContent(active.path, content)} onSave={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} onCursorChange={setCursor} revealLine={revealLine} fontSize={14 * ideZoom / 100} />
