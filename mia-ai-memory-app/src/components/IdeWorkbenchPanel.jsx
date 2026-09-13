@@ -147,14 +147,14 @@ export default function IdeWorkbenchPanel({ activePanel, onPanelChange, onClose,
       {activePanel === "problems" ? (
         <div className="ide-problems-panel">
           {analysis.diagnostics.map((item, index) => <button key={`${item.line}:${item.message}:${index}`} className={`severity-${item.severity}`} onClick={() => onRevealLine(item.line)}><i>{severityIcon(item.severity)}</i><span><strong>{item.message}</strong><small>Ln {item.line} · {workspace.activeTab?.name || "arquivo ativo"}</small></span></button>)}
-          {!analysis.diagnostics.length ? <div className="ide-panel-empty"><span>✓</span><strong>Nenhum problema local detectado</strong><small>Validação estrutural e conflitos estão limpos no arquivo ativo.</small></div> : null}
+          {!analysis.diagnostics.length ? <div className="ide-panel-empty"><span>✓</span><strong>Nenhum problema local detectado</strong><small>{workspace.activeTab ? "Validação estrutural e conflitos estão limpos no arquivo ativo." : "Abra um arquivo para executar a análise local de problemas."}</small></div> : null}
         </div>
       ) : null}
 
       {activePanel === "outline" ? (
         <div className="ide-outline-panel">
           {analysis.symbols.map((symbol, index) => <button key={`${symbol.kind}:${symbol.name}:${symbol.line}:${index}`} onClick={() => onRevealLine(symbol.line)}><span className={`symbol-kind kind-${symbol.kind}`}>{symbol.kind.slice(0, 2).toUpperCase()}</span><strong>{symbol.name}</strong><small>Ln {symbol.line}</small></button>)}
-          {!analysis.symbols.length ? <div className="ide-panel-empty"><span>◇</span><strong>Nenhum símbolo indexado</strong><small>O provider local ainda não encontrou classes, funções ou tipos neste arquivo.</small></div> : null}
+          {!analysis.symbols.length ? <div className="ide-panel-empty"><span>◇</span><strong>Nenhum símbolo indexado</strong><small>{workspace.activeTab ? "O provider local ainda não encontrou classes, funções ou tipos neste arquivo." : "Abra um arquivo para carregar a árvore AST e os símbolos locais."}</small></div> : null}
         </div>
       ) : null}
 

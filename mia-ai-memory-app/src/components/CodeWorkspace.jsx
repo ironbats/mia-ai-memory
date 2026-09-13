@@ -608,31 +608,27 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
               })}
               {!workspace.tabs.length ? <span className="ide-tabs-empty">Abra um arquivo no Explorer ou use Ctrl/Cmd+P</span> : null}
             </div>
-            {active ? (
-              <>
-                <div className="ide-editor-toolbar">
-                  <div className="ide-breadcrumbs">{active.path.split("/").map((part, index, values) => <React.Fragment key={`${part}:${index}`}><span>{part}</span>{index < values.length - 1 ? <i>›</i> : null}</React.Fragment>)}</div>
-                  <div className="ide-editor-actions">
-                    <button className={workbenchPanel === "problems" ? "active" : ""} onClick={() => openPanel("problems")} title="Problems">{analysis.errorCount ? `× ${analysis.errorCount}` : "✓"}</button>
-                    <button className={workbenchPanel === "outline" ? "active" : ""} onClick={() => openPanel("outline")} title="Outline / AST">AST {analysis.symbols.length}</button>
-                    <button className={workbenchPanel === "changes" ? "active" : ""} onClick={() => openPanel("changes")} title="Source Control / Diff">⑂ {workspace.sessionChanges?.length || 0}</button>
-                    <button className={workbenchPanel === "terminal" ? "active" : ""} onClick={() => openPanel("terminal")} title="Workspace Terminal">›_</button>
-                    <button className={workspace.contextPaths.includes(active.path) ? "active" : ""} onClick={() => workspace.toggleContext(active.path)}>{workspace.contextPaths.includes(active.path) ? "● Contexto" : "○ Fixar"}</button>
-                    <button onClick={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} disabled={!active.dirty || workspace.projectSwitching || workspace.workspaceBusy}>Salvar</button>
-                  </div>
-                </div>
-                <SyntaxEditor key={active.path} value={active.content} language={active.language} path={active.path} onChange={content => workspace.updateContent(active.path, content)} onSave={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} onCursorChange={setCursor} revealLine={revealLine} fontSize={14 * ideZoom / 100} />
-                {workbenchPanel ? <IdeWorkbenchPanel activePanel={workbenchPanel} onPanelChange={setWorkbenchPanel} onClose={closePanel} workspace={workspace} analysis={analysis} onRevealLine={revealActiveLine} onResizeStart={startWorkbenchResize} /> : null}
-                <footer className="ide-statusbar">
-                  <button className="status-git" onClick={() => openPanel("changes")} title={workspace.gitHead ? `HEAD ${workspace.gitHead}` : "Git"}>{workspace.gitRepository ? `⑂ ${workspace.gitBranch || workspace.gitHeadShort || "Git"}` : "sem Git"}</button>
-                  <span className={active.dirty ? "status-dirty" : "status-saved"}>{active.dirty ? "● Modificado" : "✓ Salvo"}</span>
-                  <button onClick={() => openPanel("problems")} className={analysis.errorCount ? "status-problem" : ""}>{analysis.errorCount ? `× ${analysis.errorCount}` : "✓ 0"}</button>
-                  <span>Ln {cursor.line}, Col {cursor.column}</span><span>{active.language}</span><span>{lines} linhas</span><strong>Ctrl+Space sugestões</strong>
-                </footer>
-              </>
-            ) : (
-              <div className="ide-editor-empty"><span>&lt;/&gt;</span><strong>Escolha um arquivo para começar</strong><p>Quick Open, Command Palette, Source Control, Outline e Terminal ficam disponíveis sem sair do fluxo com o agente.</p></div>
-            )}
+            <div className="ide-editor-toolbar">
+              <div className={`ide-breadcrumbs${active ? "" : " workspace-tools"}`}>
+                {active ? active.path.split("/").map((part, index, values) => <React.Fragment key={`${part}:${index}`}><span>{part}</span>{index < values.length - 1 ? <i>›</i> : null}</React.Fragment>) : <><span>Workspace</span><i>›</i><span>Ferramentas de desenvolvimento</span></>}
+              </div>
+              <div className="ide-editor-actions ide-workbench-actions" aria-label="Ferramentas de desenvolvimento">
+                <button className={workbenchPanel === "problems" ? "active" : ""} onClick={() => openPanel("problems")} title="Problems · Ctrl/Cmd+Shift+M"><span>✓</span><strong>Problems</strong><b>{analysis.diagnostics.length}</b></button>
+                <button className={workbenchPanel === "outline" ? "active" : ""} onClick={() => openPanel("outline")} title="Outline / AST · Ctrl/Cmd+Shift+O"><span>◇</span><strong>AST</strong><b>{analysis.symbols.length}</b></button>
+                <button className={workbenchPanel === "changes" ? "active" : ""} onClick={() => openPanel("changes")} title="Git / Source Control · Ctrl/Cmd+Shift+G"><span>⑂</span><strong>Git</strong><b>{workspace.sessionChanges?.length || 0}</b></button>
+                <button className={workbenchPanel === "terminal" ? "active" : ""} onClick={() => openPanel("terminal")} title="Workspace Terminal · Ctrl/Cmd+`"><span>›_</span><strong>Terminal</strong></button>
+                {active ? <button className={workspace.contextPaths.includes(active.path) ? "active" : ""} onClick={() => workspace.toggleContext(active.path)}>{workspace.contextPaths.includes(active.path) ? "● Contexto" : "○ Fixar"}</button> : null}
+                {active ? <button onClick={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} disabled={!active.dirty || workspace.projectSwitching || workspace.workspaceBusy}>Salvar</button> : null}
+              </div>
+            </div>
+            {active ? <SyntaxEditor key={active.path} value={active.content} language={active.language} path={active.path} onChange={content => workspace.updateContent(active.path, content)} onSave={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} onCursorChange={setCursor} revealLine={revealLine} fontSize={14 * ideZoom / 100} /> : <div className="ide-editor-empty"><span>&lt;/&gt;</span><strong>Escolha um arquivo para começar</strong><p>Git, Terminal, AST e Problems permanecem acessíveis acima mesmo sem um arquivo aberto.</p></div>}
+            {workbenchPanel ? <IdeWorkbenchPanel activePanel={workbenchPanel} onPanelChange={setWorkbenchPanel} onClose={closePanel} workspace={workspace} analysis={analysis} onRevealLine={revealActiveLine} onResizeStart={startWorkbenchResize} /> : null}
+            <footer className="ide-statusbar">
+              <button className="status-git" onClick={() => openPanel("changes")} title={workspace.gitHead ? `HEAD ${workspace.gitHead}` : "Git"}>{workspace.gitRepository ? `⑂ ${workspace.gitBranch || workspace.gitHeadShort || "Git"}` : "sem Git"}</button>
+              {active ? <span className={active.dirty ? "status-dirty" : "status-saved"}>{active.dirty ? "● Modificado" : "✓ Salvo"}</span> : <span className="status-saved">✓ Workspace ativo</span>}
+              <button onClick={() => openPanel("problems")} className={analysis.errorCount ? "status-problem" : ""}>{analysis.errorCount ? `× ${analysis.errorCount}` : "✓ 0"}</button>
+              {active ? <><span>Ln {cursor.line}, Col {cursor.column}</span><span>{active.language}</span><span>{lines} linhas</span><strong>Ctrl+Space sugestões</strong></> : <><span>{workspace.filePaths.length} arquivos</span><span>{workspace.contextPaths.length} contexto</span><span>{workspace.sessionChanges?.length || 0} changes</span><strong>Ctrl+` Terminal · Ctrl+Shift+G Git</strong></>}
+            </footer>
           </div>
         </div>
       )}
