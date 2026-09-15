@@ -42,15 +42,18 @@ const memoryLabel = message => {
 const planStatus = message => message.metadata?.codeChangeResult?.status || message.metadata?.codeChangePlan?.status || "proposed"
 
 const CHAT_ZOOM_STEPS = [100, 110, 120, 130, 140]
+const CHAT_DEFAULT_ZOOM = 120
+const CHAT_ZOOM_VERSION = "2"
 
 const loadChatZoom = () => {
-  if (typeof window === "undefined") return 110
+  if (typeof window === "undefined") return CHAT_DEFAULT_ZOOM
   try {
+    if (window.localStorage.getItem("ai-memory.chat.zoom.version") !== CHAT_ZOOM_VERSION) return CHAT_DEFAULT_ZOOM
     const value = Number(window.localStorage.getItem("ai-memory.chat.zoom"))
-    if (!Number.isFinite(value)) return 110
-    return CHAT_ZOOM_STEPS.reduce((best, step) => Math.abs(step - value) < Math.abs(best - value) ? step : best, 110)
+    if (!Number.isFinite(value)) return CHAT_DEFAULT_ZOOM
+    return CHAT_ZOOM_STEPS.reduce((best, step) => Math.abs(step - value) < Math.abs(best - value) ? step : best, CHAT_DEFAULT_ZOOM)
   } catch {
-    return 110
+    return CHAT_DEFAULT_ZOOM
   }
 }
 
@@ -220,6 +223,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   useEffect(() => {
     try {
       window.localStorage.setItem("ai-memory.chat.zoom", String(chatZoom))
+      window.localStorage.setItem("ai-memory.chat.zoom.version", CHAT_ZOOM_VERSION)
     } catch {
     }
   }, [chatZoom])
@@ -324,7 +328,8 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
       if (plan.workspace?.rootName && workspace.rootName !== plan.workspace.rootName) throw new Error(`O plano foi gerado para “${plan.workspace.rootName}”. A pasta aberta é “${workspace.rootName}”.`)
       const result = await workspace.applyChangePlan(plan)
       const reported = await reportCodeResult(message.conversationId || conversation?.id, message.id, result)
-      setCodeNotice(`${result.files.length} alteração(ões) aplicada(s) em ${workspace.rootName}${automatic ? " automaticamente" : ""}${reported ? "" : " · auditoria remota pendente"}.`)
+      const destination = workspace.workspaceMode === "portable" ? "Browser Workspace" : workspace.workspaceMode === "runtime" ? "filesystem físico" : "pasta local"
+      setCodeNotice(`${result.files.length} alteração(ões) aplicada(s) em ${workspace.rootName} · ${destination}${automatic ? " · auto apply" : ""}${reported ? "" : " · auditoria remota pendente"}.`)
       await loadConversation(message.conversationId || conversation?.id)
     } catch (applyError) {
       const status = applyError.code === "WORKSPACE_CONFLICT" ? "conflict" : "failed"
@@ -498,10 +503,10 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
           <div className="chat-toolbar-actions">
             <button className="chat-sidebar-toggle" aria-expanded={!sidebarHidden} aria-controls="chat-conversations-pane" onClick={() => setSidebarHidden(value => !value)} title={sidebarHidden ? "Mostrar conversas" : "Recolher conversas"}>☰ Conversas</button>
             {sidebarHidden ? <button className="chat-sidebar-toggle" onClick={newConversation} disabled={sending} title="Nova conversa">+ Nova</button> : null}
-            <div className="chat-zoom-control" aria-label="Escala visual do chat"><button onClick={() => changeChatZoom(-1)} disabled={chatZoom === CHAT_ZOOM_STEPS[0]} title="Diminuir escala do chat">−</button><button className="chat-zoom-value" onClick={() => setChatZoom(110)} title="Restaurar escala recomendada">{chatZoom}%</button><button onClick={() => changeChatZoom(1)} disabled={chatZoom === CHAT_ZOOM_STEPS[CHAT_ZOOM_STEPS.length - 1]} title="Aumentar escala do chat">+</button></div>
+            <div className="chat-zoom-control" aria-label="Escala visual do chat"><button onClick={() => changeChatZoom(-1)} disabled={chatZoom === CHAT_ZOOM_STEPS[0]} title="Diminuir escala do chat">−</button><button className="chat-zoom-value" onClick={() => setChatZoom(CHAT_DEFAULT_ZOOM)} title="Restaurar escala recomendada">{chatZoom}%</button><button onClick={() => changeChatZoom(1)} disabled={chatZoom === CHAT_ZOOM_STEPS[CHAT_ZOOM_STEPS.length - 1]} title="Aumentar escala do chat">+</button></div>
             <button className={`chat-ide-button${ideOpen ? " active" : ""}`} onClick={ideOpen ? onCloseIDE : onOpenIDE}><span>&lt;/&gt;</span>{workspace?.isReady ? workspace.rootName : "Abrir IDE"}</button>
             {ideOpen ? <button className="chat-ide-resize" onClick={cycleIDELayout} title="Alternar tamanho da IDE">{ideLayout === "compact" ? "▯" : ideLayout === "wide" ? "▰" : "◫"}</button> : null}
-            {workspace?.isReady ? <button className={`chat-auto-apply${workspace.autoApply ? " active" : ""}`} onClick={() => workspace.setAutoApply(!workspace.autoApply)} title="Quando ativo, planos de código sem conflito são gravados automaticamente na pasta local"><i />Auto apply</button> : null}
+            {workspace?.isReady ? <button className={`chat-auto-apply${workspace.autoApply ? " active" : ""}`} onClick={() => workspace.setAutoApply(!workspace.autoApply)} title={workspace.workspaceMode === "portable" ? "Quando ativo, planos sem conflito são aplicados na cópia Browser Workspace. A pasta física original não é alterada." : "Quando ativo, planos de código sem conflito são gravados automaticamente no projeto físico conectado."}><i />Auto apply</button> : null}
             {!selectedAgent?.credentialReady && ["api-key", "hybrid"].includes(selectedAgent?.connectionType) ? <button className="chat-config-warning" onClick={onConfigure}>Cadastrar chave</button> : <span className="chat-ready"><i />memória contínua</span>}
             <button className="secondary-button compact" onClick={exportConversation} disabled={!conversation || sending}>Exportar ZIP</button>
           </div>
@@ -525,7 +530,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
               <div className="chat-welcome-mark"><span /></div>
               <span className="eyebrow">AI Memory Web Chat</span>
               <h2>Troque o agente.<br /><em>Não perca o trabalho.</em></h2>
-              <p>{workspace?.isReady ? `O projeto ${workspace.rootName} está conectado. Peça uma alteração e o agente receberá código + memória como contexto, gerando operações aplicáveis diretamente na pasta local.` : "O contexto é reconstruído a partir da memória consolidada, conversas anteriores e anexos. Abra a IDE para conectar também o código local ao agente."}</p>
+              <p>{workspace?.isReady ? workspace.workspaceMode === "portable" ? `O projeto ${workspace.rootName} está em Browser Workspace. O agente pode editar a cópia da IDE; conecte ao HOST RW para gravar no filesystem físico e usar Git/terminal reais.` : `O projeto ${workspace.rootName} está conectado. Peça uma alteração e o agente receberá código + memória como contexto, gerando operações aplicáveis diretamente no projeto físico.` : "O contexto é reconstruído a partir da memória consolidada, conversas anteriores e anexos. Abra a IDE para conectar também o código local ao agente."}</p>
               <div className="chat-welcome-points"><span>GPT</span><span>Claude</span><span>Gemini</span><span>Cursor</span><span>Grok</span>{workspace?.isReady ? <span className="code-point">{workspace.rootName}</span> : null}</div>
               {!workspace?.isReady ? <button className="chat-welcome-ide" onClick={onOpenIDE}>&lt;/&gt; Selecionar projeto e abrir IDE</button> : null}
             </div>
@@ -545,6 +550,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
                     const fromAttachment = plan.workspace?.source === "attachment"
                     const downloadable = (plan.operations || []).some(operation => operation.type === "write" && typeof operation.content === "string")
                     const deleteCount = (plan.operations || []).filter(operation => operation.type === "delete").length
+                    const appliedMode = message.metadata?.codeChangeResult?.workspaceMode || workspace?.workspaceMode || ""
                     return (
                       <div className={`chat-code-plan ${status}`}>
                         <div className="chat-code-plan-head"><span>&lt;/&gt;</span><div><strong>{plan.summary || "Alterações de código prontas"}</strong><small>{plan.operations?.length || 0} operação(ões) · {plan.workspace?.rootName || "workspace local"}{fromAttachment ? " · origem ZIP" : plan.workspace?.branch ? ` · ${plan.workspace.branch}` : ""}</small></div><i>{status === "applied" ? "APLICADO" : status === "conflict" ? "CONFLITO" : status === "failed" ? "FALHOU" : "PRONTO"}</i></div>
@@ -554,7 +560,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
                         <div className="chat-code-plan-actions">
                           <button onClick={onOpenIDE}>Abrir IDE</button>
                           {downloadable ? <button className="download" onClick={() => downloadCodePlan(message)} disabled={downloadingId === message.id}>{downloadingId === message.id ? "Gerando ZIP…" : "↓ Baixar solução ZIP"}</button> : null}
-                          {!fromAttachment && status !== "applied" ? <button className="primary" onClick={() => applyCodePlan(message)} disabled={applyingId === message.id}>{applyingId === message.id ? "Aplicando…" : "Aplicar alterações"}</button> : status === "applied" ? <strong>✓ Gravado no projeto local</strong> : fromAttachment ? <strong>ZIP pronto para download</strong> : null}
+                          {!fromAttachment && status !== "applied" ? <button className="primary" onClick={() => applyCodePlan(message)} disabled={applyingId === message.id}>{applyingId === message.id ? "Aplicando…" : "Aplicar alterações"}</button> : status === "applied" ? <strong>{appliedMode === "portable" ? "✓ Gravado no Browser Workspace" : appliedMode === "runtime" ? "✓ Gravado no projeto físico" : "✓ Gravado na pasta local"}</strong> : fromAttachment ? <strong>ZIP pronto para download</strong> : null}
                         </div>
                       </div>
                     )

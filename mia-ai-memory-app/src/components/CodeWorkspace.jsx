@@ -3,6 +3,7 @@ import SyntaxEditor from "./SyntaxEditor.jsx"
 import IdeDialog from "./IdeDialog.jsx"
 import IdeWorkbenchPanel from "./IdeWorkbenchPanel.jsx"
 import ProjectSwitcher from "./ProjectSwitcher.jsx"
+import PortableProjectImportDialog from "./PortableProjectImportDialog.jsx"
 import ResizeHandle from "./layout/ResizeHandle.jsx"
 import ProjectSearch from "./ide/ProjectSearch.jsx"
 import IdeViewOptions from "./ide/IdeViewOptions.jsx"
@@ -10,7 +11,7 @@ import useStoredPreference from "../hooks/useStoredPreference.js"
 import useDialogFocus from "../hooks/useDialogFocus.js"
 import useElementSize from "../hooks/useElementSize.js"
 import { analyzeDocument } from "../lib/ideLanguageService.js"
-import { confirmAction } from "../lib/dialogService.js"
+import { confirmAction, promptValue } from "../lib/dialogService.js"
 
 const fileBadge = path => {
   const name = String(path || "").split("/").pop() || ""
@@ -95,12 +96,24 @@ const loadNumber = (key, fallback) => {
   }
 }
 
-const IDE_ZOOM_STEPS = [90, 100, 110, 120, 130]
+const IDE_ZOOM_STEPS = [90, 100, 110, 120, 130, 140]
+const IDE_DEFAULT_ZOOM = 120
+const IDE_ZOOM_VERSION = "2"
 
 const clampIdeZoom = value => {
   const numeric = Number(value)
-  if (!Number.isFinite(numeric)) return 100
-  return IDE_ZOOM_STEPS.reduce((best, step) => Math.abs(step - numeric) < Math.abs(best - numeric) ? step : best, 100)
+  if (!Number.isFinite(numeric)) return IDE_DEFAULT_ZOOM
+  return IDE_ZOOM_STEPS.reduce((best, step) => Math.abs(step - numeric) < Math.abs(best - numeric) ? step : best, IDE_DEFAULT_ZOOM)
+}
+
+const loadIdeZoom = () => {
+  if (typeof window === "undefined") return IDE_DEFAULT_ZOOM
+  try {
+    if (window.localStorage.getItem("ai-memory.ide.zoom.version") !== IDE_ZOOM_VERSION) return IDE_DEFAULT_ZOOM
+    return clampIdeZoom(loadNumber("ai-memory.ide.zoom", IDE_DEFAULT_ZOOM))
+  } catch {
+    return IDE_DEFAULT_ZOOM
+  }
 }
 
 const buildIdeMetrics = zoom => {
@@ -135,7 +148,10 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const [cursor, setCursor] = useState({ line: 1, column: 1 })
   const [dialog, setDialog] = useState(null)
   const [workbenchPanel, setWorkbenchPanel] = useState("")
-  const [ideZoom, setIdeZoom] = useState(() => clampIdeZoom(loadNumber("ai-memory.ide.zoom", 100)))
+  const [portableImportOpen, setPortableImportOpen] = useState(false)
+  const [portableImportBusy, setPortableImportBusy] = useState(false)
+  const [portableImportError, setPortableImportError] = useState("")
+  const [ideZoom, setIdeZoom] = useState(loadIdeZoom)
   const [preferredExplorerWidth, setExplorerWidth] = useStoredPreference("ai-memory.ide.explorerWidth", 264)
   const [preferredWorkbenchHeight, setWorkbenchHeight] = useStoredPreference("ai-memory.ide.workbenchHeight", 260)
   const [explorerHidden, setExplorerHidden] = useStoredPreference("ai-memory.ide.explorerHidden", false)
@@ -196,7 +212,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const openSearch = () => { setExplorerHidden(false); setSidebarMode("search") }
   const requestFind = (replace = false) => { if (active) setEditorRequest({ replace, nonce: Date.now() }) }
   const requestGoToLine = () => { if (active) setDialog({ type: "go-line", title: "Ir para linha", description: `Informe linha ou linha:coluna (1–${lines}).`, confirmLabel: "Ir", value: String(cursor.line) }) }
-  const resetView = () => { setExplorerWidth(264); setWorkbenchHeight(260); setExplorerHidden(false); setIdeZoom(100); onLayoutChange("split") }
+  const resetView = () => { setExplorerWidth(264); setWorkbenchHeight(260); setExplorerHidden(false); setIdeZoom(IDE_DEFAULT_ZOOM); onLayoutChange("split") }
   const revealInExplorer = () => {
     if (!active) return
     setExplorerHidden(false)
@@ -225,7 +241,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       return IDE_ZOOM_STEPS[nextIndex]
     })
   }
-  const resetIdeZoom = () => setIdeZoom(100)
+  const resetIdeZoom = () => setIdeZoom(IDE_DEFAULT_ZOOM)
 
   const selectDirectoryNow = async () => {
     setLocalError("")
@@ -237,29 +253,157 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
     }
   }
 
+  const selectRuntimeDirectoryNow = async () => {
+    setLocalError("")
+    setDialog(null)
+    try {
+      await workspace.selectRuntimeDirectory()
+    } catch (error) {
+      if (error?.name === "AbortError" || error?.code === "PICKER_CANCELLED" || error?.status === 499) return
+      if (error?.code === "PICKER_UNAVAILABLE" || error?.status === 501) {
+        const absolutePath = await promptValue({
+          tone: "secure",
+          title: "Conectar pasta física ao Workspace Runtime",
+          description: "O seletor nativo do sistema não está disponível neste desktop. Informe o caminho absoluto do projeto para conectar leitura, escrita física e terminal real.",
+          detail: "Exemplo: /home/felipe/projetos/mia-next-api",
+          inputLabel: "Caminho absoluto",
+          placeholder: "/home/usuario/projetos/meu-projeto",
+          confirmLabel: "Conectar projeto"
+        })
+        if (!absolutePath) return
+        try {
+          await workspace.registerRuntimePath(absolutePath)
+          return
+        } catch (registerError) {
+          setLocalError(registerError.message || String(registerError))
+          return
+        }
+      }
+      setLocalError(error.message || String(error))
+    }
+  }
+
+  const importPortableSource = async source => {
+    if (portableImportBusy) return
+    setPortableImportBusy(true)
+    setPortableImportError("")
+    setLocalError("")
+    try {
+      await workspace.importPortableProject(source)
+      setPortableImportOpen(false)
+    } catch (error) {
+      if (error?.name !== "AbortError") setPortableImportError(error.message || String(error))
+    } finally {
+      setPortableImportBusy(false)
+    }
+  }
+
+  const pickPortableFolder = async () => {
+    setPortableImportError("")
+    if (typeof window.showDirectoryPicker !== "function") {
+      setPortableImportError("Este navegador não expõe um seletor de diretórios compatível com a IDE. Arraste a pasta para esta janela ou importe um ZIP do projeto.")
+      return
+    }
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "read", id: "ai-memory-portable-import" })
+      await importPortableSource({ kind: "handle", handle })
+    } catch (error) {
+      if (error?.name !== "AbortError") setPortableImportError(error.message || String(error))
+    }
+  }
+
   const chooseDirectory = async () => {
+    if (workspace.runtimeAvailable) {
+      const confirmed = await confirmAction({
+        tone: "secure",
+        title: workspace.projects?.length ? "Conectar outro projeto físico?" : "Conectar projeto físico à IDE?",
+        description: workspace.isReady
+          ? `O projeto ${workspace.rootName} continuará disponível. O novo projeto será aberto pelo Workspace Runtime e qualquer alteração aplicada pelo agente será gravada no filesystem real da máquina.`
+          : "O Workspace Runtime conecta a IDE ao filesystem real da máquina. Isso habilita escrita física, Git real e execução de comandos como npm, go, java, docker e scripts diretamente no projeto.",
+        detail: "O runtime escuta apenas em localhost. O terminal inicia na raiz do projeto e executa comandos com as permissões do usuário local; revise comandos destrutivos antes de executá-los.",
+        confirmLabel: "Selecionar projeto físico"
+      })
+      if (!confirmed) return
+      await selectRuntimeDirectoryNow()
+      return
+    }
+    const direct = workspace.directAccessSupported
+    if (!direct) {
+      setPortableImportError("")
+      setPortableImportOpen(true)
+      return
+    }
     const confirmed = await confirmAction({
       tone: "secure",
       title: workspace.projects?.length ? "Adicionar outro projeto à IDE?" : "Adicionar projeto local à IDE?",
       description: workspace.isReady
         ? `O projeto ${workspace.rootName} continuará disponível. Depois de autorizar outra pasta, você poderá alternar entre os projetos pelo seletor da IDE sem perder abas ou alterações não salvas da sessão.`
-        : "A IDE precisa de leitura e escrita para salvar arquivos e aplicar alterações do agente. Depois desta confirmação, Chrome ou Edge exibirá a própria permissão de segurança do navegador.",
-      detail: "A pasta não é enviada integralmente ao servidor. O registro dos projetos fica no navegador e a permissão final de arquivos continua sob controle do Chrome ou Edge.",
+        : "A IDE precisa de leitura e escrita para salvar arquivos e aplicar alterações do agente. Depois desta confirmação, o navegador exibirá a própria permissão de segurança da pasta.",
+      detail: "A pasta não é enviada integralmente ao servidor. O registro dos projetos fica no navegador e a permissão final de arquivos continua sob controle do próprio navegador.",
       confirmLabel: "Selecionar pasta do projeto"
     })
     if (!confirmed) return
     await selectDirectoryNow()
   }
 
+  const connectCurrentProjectToHost = async () => {
+    if (!["portable", "direct"].includes(workspace.workspaceMode) || !workspace.runtimeAvailable) return
+    const portable = workspace.workspaceMode === "portable"
+    const confirmed = await confirmAction({
+      tone: "secure",
+      title: portable ? `Conectar ${workspace.rootName} à pasta física?` : `Habilitar terminal HOST RW em ${workspace.rootName}?`,
+      description: portable
+        ? "O AI Memory vai selecionar a pasta física correspondente, verificar conflitos e migrar o projeto de Browser Workspace para HOST RW. Alterações rastreadas na sessão serão sincronizadas no disco antes da troca."
+        : "O projeto já grava diretamente na pasta física pelo navegador. O AI Memory vai conectar a mesma pasta ao Workspace Runtime para habilitar Git real, terminal, builds e execução de aplicações sem duplicar o projeto.",
+      detail: portable
+        ? "Depois da migração, Git do sistema operacional, terminal real, builds e Auto Apply trabalharão no filesystem físico. Se a pasta tiver divergências, a operação será bloqueada sem sobrescrever arquivos."
+        : "A IDE valida o nome do projeto e o HEAD Git antes de trocar o adapter. Abas, arquivos não salvos e o projectId atual são preservados.",
+      confirmLabel: portable ? "Conectar ao host" : "Habilitar HOST RW"
+    })
+    if (!confirmed) return
+    setLocalError("")
+    const connect = pathValue => portable ? workspace.connectPortableProjectToRuntime(pathValue) : workspace.connectDirectProjectToRuntime(pathValue)
+    try {
+      await connect()
+    } catch (error) {
+      if (error?.name === "AbortError" || error?.code === "PICKER_CANCELLED" || error?.status === 499) return
+      if (error?.code === "PICKER_UNAVAILABLE" || error?.status === 501) {
+        const absolutePath = await promptValue({
+          tone: "secure",
+          title: "Localizar pasta física do projeto",
+          description: `Informe o caminho absoluto da pasta física correspondente a ${workspace.rootName}.`,
+          detail: "A pasta é validada pelo Workspace Runtime antes de qualquer escrita ou execução de comando.",
+          inputLabel: "Caminho absoluto",
+          placeholder: "/home/usuario/projetos/meu-projeto",
+          confirmLabel: portable ? "Conectar ao host" : "Habilitar HOST RW"
+        })
+        if (!absolutePath) return
+        try {
+          await connect(absolutePath)
+          return
+        } catch (registerError) {
+          setLocalError(registerError.message || String(registerError))
+          return
+        }
+      }
+      setLocalError(error.message || String(error))
+    }
+  }
+
   const changeProject = async projectId => {
     if (!projectId || projectId === workspace.activeProjectId) return true
     const target = workspace.projects?.find(project => project.id === projectId)
     if (target?.permission !== "granted") {
+      const runtimeProject = target.mode === "runtime"
       const confirmed = await confirmAction({
         tone: "secure",
         title: `Reconectar ${target.name}?`,
-        description: "O projeto já está registrado na IDE, mas o navegador precisa renovar a autorização de leitura e escrita antes de reabri-lo.",
-        detail: "Depois desta confirmação, Chrome ou Edge poderá exibir a permissão nativa de segurança da pasta.",
+        description: runtimeProject
+          ? "O projeto físico está registrado, mas o Workspace Runtime local não está acessível. Inicie o runtime e reconecte para recuperar escrita no disco, Git real e terminal real."
+          : "O projeto já está registrado na IDE, mas o navegador precisa renovar a autorização de leitura e escrita antes de reabri-lo.",
+        detail: runtimeProject
+          ? "Execute o backend local com script/run-local.sh ou inicie script/workspace-runtime.sh start."
+          : "Depois desta confirmação, Chrome ou Edge poderá exibir a permissão nativa de segurança da pasta.",
         confirmLabel: "Reconectar projeto"
       })
       if (!confirmed) return false
@@ -278,13 +422,18 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
     const target = project || workspace.activeProject
     if (!target?.id) return false
     const dirtyCount = Number(target.dirtyCount || (target.id === workspace.activeProjectId ? workspace.dirtyCount : 0))
+    const portable = target.mode === "portable"
     const confirmed = await confirmAction({
       tone: dirtyCount ? "danger" : "default",
       title: `Remover ${target.name} da IDE?`,
       description: dirtyCount
-        ? `${dirtyCount} arquivo(s) têm alterações não salvas no editor. Remover o projeto descartará somente esse estado não salvo; nenhum arquivo da pasta local será apagado.`
-        : "O projeto será removido da lista da IDE, mas nenhum arquivo da pasta local será apagado. Você poderá adicioná-lo novamente quando quiser.",
-      detail: "Esta ação remove apenas o vínculo local armazenado pelo AI Memory neste navegador.",
+        ? portable
+          ? `${dirtyCount} arquivo(s) têm alterações não salvas no editor. Remover o projeto descartará o estado da IDE e apagará somente a cópia privada deste navegador; a pasta original da máquina não será alterada.`
+          : `${dirtyCount} arquivo(s) têm alterações não salvas no editor. Remover o projeto descartará somente esse estado não salvo; nenhum arquivo da pasta local será apagado.`
+        : portable
+          ? "O projeto será removido da IDE e a cópia privada armazenada neste navegador será apagada. A pasta original selecionada na máquina permanece intacta."
+          : "O projeto será removido da lista da IDE, mas nenhum arquivo da pasta local será apagado. Você poderá adicioná-lo novamente quando quiser.",
+      detail: portable ? "Esta ação afeta somente o workspace privado do AI Memory neste navegador." : "Esta ação remove apenas o vínculo local armazenado pelo AI Memory neste navegador.",
       confirmLabel: "Remover da IDE"
     })
     if (!confirmed) return false
@@ -373,10 +522,10 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
     { id: "changes", label: "View: Source Control / Changes", detail: `${workspace.sessionChanges?.length || 0} alteração(ões) da sessão`, shortcut: "Ctrl+Shift+G", run: () => openPanel("changes") },
     { id: "problems", label: "View: Problems", detail: `${analysis.diagnostics.length} diagnóstico(s) local(is)`, shortcut: "Ctrl+Shift+M", run: () => openPanel("problems") },
     { id: "outline", label: "View: Outline / AST", detail: `${analysis.symbols.length} símbolo(s) detectado(s)`, shortcut: "Ctrl+Shift+O", run: () => openPanel("outline") },
-    { id: "terminal", label: "View: Workspace Terminal", detail: "Terminal seguro do workspace no navegador", shortcut: "Ctrl+`", run: () => openPanel("terminal") },
+    { id: "terminal", label: "View: Workspace Terminal", detail: workspace.terminalRuntimeAvailable ? "Terminal real no filesystem físico" : "Terminal seguro do navegador; HOST RW habilita comandos reais", shortcut: "Ctrl+`", run: () => openPanel("terminal") },
     { id: "zoom-in", label: "View: Increase IDE Zoom", detail: `Aumentar legibilidade da IDE · atual ${ideZoom}%`, shortcut: "Ctrl+Alt+=", run: () => changeIdeZoom(1) },
     { id: "zoom-out", label: "View: Decrease IDE Zoom", detail: `Reduzir escala visual da IDE · atual ${ideZoom}%`, shortcut: "Ctrl+Alt+-", run: () => changeIdeZoom(-1) },
-    { id: "zoom-reset", label: "View: Reset IDE Zoom", detail: "Restaurar escala visual para 100%", shortcut: "Ctrl+Alt+0", run: resetIdeZoom },
+    { id: "zoom-reset", label: "View: Reset IDE Zoom", detail: `Restaurar escala visual para ${IDE_DEFAULT_ZOOM}%`, shortcut: "Ctrl+Alt+0", run: resetIdeZoom },
     { id: "project-search", label: "Buscar: Conteúdo no projeto", detail: "Buscar também nas alterações não salvas", shortcut: "Ctrl+Shift+F", run: openSearch },
     { id: "find", label: "Buscar: No arquivo", detail: "Localizar texto no editor", shortcut: "Ctrl+F", run: () => requestFind() },
     { id: "replace", label: "Buscar: Substituir no arquivo", detail: "Revisar no editor antes de salvar", shortcut: "Ctrl+H", run: () => requestFind(true) },
@@ -525,7 +674,10 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   }, [workspace.activePath, workspace.activeProjectId])
 
   useEffect(() => {
-    try { window.localStorage.setItem("ai-memory.ide.zoom", String(ideZoom)) } catch {}
+    try {
+      window.localStorage.setItem("ai-memory.ide.zoom", String(ideZoom))
+      window.localStorage.setItem("ai-memory.ide.zoom.version", IDE_ZOOM_VERSION)
+    } catch {}
   }, [ideZoom])
 
   useEffect(() => {
@@ -637,18 +789,30 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   if (!workspace.supported) {
     return (
       <section className="code-workspace unsupported">
-        <div className="ide-empty-state"><span className="ide-empty-mark">&lt;/&gt;</span><h2>IDE local indisponível neste navegador</h2><p>A edição direta do projeto exige File System Access API. Abra o AI Memory em Chrome ou Edge recente.</p><button className="primary-button" onClick={onClose}>Voltar ao painel</button></div>
+        <div className="ide-empty-state"><span className="ide-empty-mark">&lt;/&gt;</span><h2>Este navegador não oferece armazenamento de projeto compatível</h2><p>A IDE precisa de acesso direto à pasta ou de suporte a diretórios com armazenamento privado do navegador. Atualize o navegador para uma versão recente e tente novamente.</p><button className="primary-button" onClick={onClose}>Voltar ao painel</button></div>
       </section>
     )
   }
 
   return (
     <section ref={rootRef} className={`code-workspace layout-${layout}${workbenchPanel ? " has-workbench" : ""}`} style={{ "--ide-explorer-width": `${explorerWidth}px`, "--ide-workbench-height": `${workbenchHeight}px`, ...buildIdeMetrics(ideZoom) }}>
+      <PortableProjectImportDialog
+        open={portableImportOpen}
+        busy={portableImportBusy}
+        error={portableImportError}
+        onCancel={() => { if (!portableImportBusy) { setPortableImportOpen(false); setPortableImportError("") } }}
+        folderPickerSupported={typeof window !== "undefined" && typeof window.showDirectoryPicker === "function"}
+        onDropProject={dataTransfer => importPortableSource({ kind: "drop", dataTransfer })}
+        onPickFolder={pickPortableFolder}
+        onFolderFiles={files => importPortableSource({ kind: "files", files })}
+        onZipProject={file => importPortableSource({ kind: "zip", file })}
+      />
       <header className="ide-topbar">
         <div className="ide-title">
           <span className="ide-logo">&lt;/&gt;</span>
           <div><span className="eyebrow">Developer Workspace</span><strong>{workspace.isReady ? workspace.rootName : "Nenhum projeto ativo"}</strong></div>
-          {workspace.isReady ? <span className="ide-write-status"><i />read/write</span> : null}
+          {workspace.isReady ? <span className={`ide-write-status${workspace.workspaceMode === "portable" ? " portable" : workspace.workspaceMode === "runtime" ? " runtime" : ""}`} title={workspace.workspaceMode === "portable" ? "Workspace editável armazenado somente no navegador; não altera a pasta física original" : workspace.workspaceMode === "runtime" ? "Projeto físico conectado ao Workspace Runtime com escrita no disco e terminal real" : "Pasta local com leitura e escrita diretas pelo navegador"}><i />{workspace.workspaceMode === "portable" ? "browser rw" : workspace.workspaceMode === "runtime" ? "host rw" : "read/write"}</span> : null}
+          {workspace.isReady && workspace.workspaceMode !== "runtime" && workspace.runtimeAvailable ? <button className="ide-host-connect" onClick={connectCurrentProjectToHost} title={workspace.workspaceMode === "portable" ? "Migrar Browser Workspace para pasta física com Git e terminal reais" : "Habilitar terminal real e Git do sistema operacional neste projeto físico"}>{workspace.workspaceMode === "portable" ? "↔ Conectar host" : ">_ Terminal host"}</button> : null}
           {workspace.isReady && workspace.gitRepository ? <button className={`ide-git-branch${workspace.gitDetached ? " detached" : ""}`} onClick={() => openPanel("changes")} title={workspace.gitHead ? `HEAD ${workspace.gitHead}` : "Repositório Git detectado"}><i>⑂</i><strong>{workspace.gitBranch || workspace.gitHeadShort || "Git"}</strong>{workspace.gitHeadShort ? <small>{workspace.gitHeadShort}</small> : null}</button> : null}
           <ProjectSwitcher workspace={workspace} onAddProject={chooseDirectory} onSelectProject={changeProject} onRemoveProject={forgetProject} />
         </div>
@@ -657,6 +821,11 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
           {workspace.isReady ? <button onClick={openCommandPalette} title="Command Palette · Ctrl/Cmd+Shift+P">⌘ Comandos</button> : null}
           {workspace.isReady ? <button onClick={() => workspace.refresh().catch(error => setLocalError(error.message || String(error)))} disabled={workspace.scanning || workspace.projectSwitching || workspace.workspaceBusy}>{workspace.scanning ? "Atualizando…" : "↻"}</button> : null}
           {workspace.dirtyCount ? <button className="accent" onClick={() => workspace.saveAll().catch(error => setLocalError(error.message || String(error)))} disabled={workspace.projectSwitching || workspace.workspaceBusy}>Salvar · {workspace.dirtyCount}</button> : null}
+          <div className="ide-zoom-control" aria-label="Escala visual da IDE" title="Zoom da IDE · Ctrl+Alt + / - / 0">
+            <button type="button" onClick={() => changeIdeZoom(-1)} disabled={ideZoom === IDE_ZOOM_STEPS[0]} aria-label="Diminuir zoom da IDE">−</button>
+            <button type="button" className="ide-zoom-value" onClick={resetIdeZoom} title="Restaurar zoom recomendado">{ideZoom}%</button>
+            <button type="button" onClick={() => changeIdeZoom(1)} disabled={ideZoom === IDE_ZOOM_STEPS[IDE_ZOOM_STEPS.length - 1]} aria-label="Aumentar zoom da IDE">+</button>
+          </div>
           <IdeViewOptions layout={layout} onLayoutChange={onLayoutChange} explorerHidden={explorerHidden} onToggleExplorer={() => setExplorerHidden(value => !value)} onReset={resetView} zoom={ideZoom} onZoom={changeIdeZoom} onResetZoom={resetIdeZoom} panelOpen={Boolean(workbenchPanel)} onTogglePanel={togglePanel} />
           <button className="ide-console-button" onClick={onClose}>Painel</button>
         </div>
@@ -667,11 +836,11 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       {!workspace.isReady ? (
         <div className="ide-empty-state">
           <span className="ide-empty-mark">&lt;/&gt;</span>
-          <span className="eyebrow">Local workspace</span>
+          <span className="eyebrow">{workspace.directAccessSupported ? "Local workspace" : "Browser workspace"}</span>
           <h2>Código, memória e agente.<br /><em>No mesmo fluxo.</em></h2>
-          <p>{workspace.projects?.length ? "Selecione no topo um projeto já adicionado ou conecte outra pasta. Cada projeto mantém suas próprias abas, contexto, alterações da sessão e estado de Git enquanto você alterna entre eles." : "Selecione a raiz do primeiro projeto para editar arquivos localmente. Depois você poderá adicionar quantos projetos precisar e alternar entre eles sem substituir o workspace atual."}</p>
-          <button className="primary-button" onClick={chooseDirectory} disabled={!workspace.projectRegistryReady}>{workspace.projectRegistryReady ? workspace.projects?.length ? "Adicionar outro projeto" : "Adicionar primeiro projeto" : "Carregando projetos…"}</button>
-          <small>{workspace.projectRegistryPersistent ? ".git, dependências, binários, chaves e arquivos .env permanecem fora do contexto enviado ao agente. A lista de projetos fica registrada neste navegador." : "A sessão multi-projeto está ativa, mas o navegador não permitiu persistir a lista localmente."}</small>
+          <p>{workspace.projects?.length ? "Selecione no topo um projeto já adicionado ou conecte outra pasta. Cada projeto mantém suas próprias abas, contexto, alterações da sessão e estado de Git enquanto você alterna entre eles." : workspace.directAccessSupported ? "Selecione a raiz do primeiro projeto para editar arquivos diretamente na pasta local. Depois você poderá adicionar quantos projetos precisar e alternar entre eles sem substituir o workspace atual." : "Importe o primeiro projeto arrastando a pasta para a IDE ou selecionando um ZIP. O AI Memory criará um workspace privado e editável neste navegador sem usar a confirmação nativa de upload de diretório."}</p>
+          <button className="primary-button" onClick={chooseDirectory} disabled={!workspace.projectRegistryReady}>{workspace.projectRegistryReady ? workspace.projects?.length ? "Adicionar outro projeto" : workspace.directAccessSupported ? "Adicionar primeiro projeto" : "Importar primeiro projeto" : "Carregando projetos…"}</button>
+          <small>{workspace.projectRegistryPersistent ? workspace.directAccessSupported ? ".git, dependências, binários, chaves e arquivos .env permanecem fora do contexto enviado ao agente. A lista de projetos fica registrada neste navegador." : "Modo Browser Workspace ativo: arraste uma pasta ou importe ZIP. Dependências, artefatos e segredos são ignorados; a cópia editável fica registrada apenas neste navegador." : "A sessão multi-projeto está ativa, mas o navegador não permitiu persistir a lista localmente."}</small>
         </div>
       ) : (
         <div ref={bodyRef} className={`ide-body${!explorerVisible ? " explorer-hidden" : ""}${narrowExplorer ? " narrow-explorer" : ""}`}>
@@ -717,7 +886,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
                 <button onClick={() => requestFind()} disabled={!active} title="Buscar no arquivo · Ctrl+F">⌕</button>
                 <button className={workbenchPanel === "problems" ? "active" : ""} onClick={() => openPanel("problems")} title="Problems · Ctrl/Cmd+Shift+M"><span>✓</span><strong>Problems</strong><b>{analysis.diagnostics.length}</b></button>
                 <button className={workbenchPanel === "outline" ? "active" : ""} onClick={() => openPanel("outline")} title="Outline / AST · Ctrl/Cmd+Shift+O"><span>◇</span><strong>AST</strong><b>{analysis.symbols.length}</b></button>
-                <button className={workbenchPanel === "changes" ? "active" : ""} onClick={() => openPanel("changes")} title="Git / Source Control · Ctrl/Cmd+Shift+G"><span>⑂</span><strong>Git</strong><b>{workspace.sessionChanges?.length || 0}</b></button>
+                <button className={workbenchPanel === "changes" ? "active" : ""} onClick={() => openPanel("changes")} title="Git / Source Control · Ctrl/Cmd+Shift+G"><span>⑂</span><strong>Git</strong><b>{workspace.terminalRuntimeAvailable ? workspace.gitWorkingChanges?.length || 0 : workspace.sessionChanges?.length || 0}</b></button>
                 <button className={workbenchPanel === "terminal" ? "active" : ""} onClick={() => openPanel("terminal")} title="Workspace Terminal · Ctrl/Cmd+`"><span>›_</span><strong>Terminal</strong></button>
                 {active ? <button className={workspace.contextPaths.includes(active.path) ? "active" : ""} onClick={() => workspace.toggleContext(active.path)}>{workspace.contextPaths.includes(active.path) ? "● Contexto" : "○ Fixar"}</button> : null}
                 {active ? <button onClick={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} disabled={!active.dirty || workspace.projectSwitching || workspace.workspaceBusy}>Salvar</button> : null}
@@ -729,7 +898,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
               <button className="status-git" onClick={() => openPanel("changes")} title={workspace.gitHead ? `HEAD ${workspace.gitHead}` : "Git"}>{workspace.gitRepository ? `⑂ ${workspace.gitBranch || workspace.gitHeadShort || "Git"}` : "sem Git"}</button>
               {active ? <span className={active.dirty ? "status-dirty" : "status-saved"}>{active.dirty ? "● Modificado" : "✓ Salvo"}</span> : <span className="status-saved">✓ Workspace ativo</span>}
               <button onClick={() => openPanel("problems")} className={analysis.errorCount ? "status-problem" : ""}>{analysis.errorCount ? `× ${analysis.errorCount}` : "✓ 0"}</button>
-              {active ? <><button onClick={requestGoToLine} title="Ir para linha · Ctrl+G">Ln {cursor.line}, Col {cursor.column}</button><span>{active.language}</span><span>{lines} linhas</span><strong>Ctrl+Space sugestões</strong></> : <><span>{workspace.filePaths.length} arquivos</span><span>{workspace.contextPaths.length} contexto</span><span>{workspace.sessionChanges?.length || 0} changes</span><strong>Ctrl+` Terminal · Ctrl+Shift+G Git</strong></>}
+              {active ? <><button onClick={requestGoToLine} title="Ir para linha · Ctrl+G">Ln {cursor.line}, Col {cursor.column}</button><span>{active.language}</span><span>{lines} linhas</span><strong>Ctrl+Space sugestões</strong></> : <><span>{workspace.filePaths.length} arquivos</span><span>{workspace.contextPaths.length} contexto</span><span>{workspace.terminalRuntimeAvailable ? workspace.gitWorkingChanges?.length || 0 : workspace.sessionChanges?.length || 0} changes</span><strong>Ctrl+` Terminal · Ctrl+Shift+G Git</strong></>}
             </footer>
           </div>
         </div>

@@ -5,10 +5,13 @@ const normalize = value => String(value || "").trim().toLowerCase()
 const projectMeta = project => {
   if (!project) return "Nenhum projeto selecionado"
   if (project.permission !== "granted") return "Reconectar para abrir"
-  if (project.gitRepository && project.gitBranch) return `⑂ ${project.gitBranch}`
-  if (Number.isFinite(project.fileCount) && project.fileCount > 0) return `${project.fileCount} arquivos indexados`
-  return project.loaded ? "Workspace carregado" : "Workspace disponível"
+  const mode = project.mode === "portable" ? "Browser workspace" : project.mode === "runtime" ? "Host workspace" : "Pasta local"
+  if (project.gitRepository && project.gitBranch) return `${mode} · ⑂ ${project.gitBranch}`
+  if (Number.isFinite(project.fileCount) && project.fileCount > 0) return `${mode} · ${project.fileCount} arquivos`
+  return project.loaded ? `${mode} · carregado` : `${mode} · disponível`
 }
+
+const projectMode = project => project?.mode === "portable" ? "Browser" : project?.mode === "runtime" ? "Host" : "Local"
 
 export default function ProjectSwitcher({ workspace, onAddProject, onSelectProject, onRemoveProject }) {
   const [open, setOpen] = useState(false)
@@ -29,7 +32,7 @@ export default function ProjectSwitcher({ workspace, onAddProject, onSelectProje
     })
     if (!term) return sorted
     return sorted.filter(project => {
-      const haystack = [project.name, project.gitBranch, project.permission, project.fileCount].map(normalize).join(" ")
+      const haystack = [project.name, project.gitBranch, project.permission, project.fileCount, project.mode, projectMode(project)].map(normalize).join(" ")
       return haystack.includes(term)
     })
   }, [projects, query, workspace.activeProjectId])
@@ -116,18 +119,18 @@ export default function ProjectSwitcher({ workspace, onAddProject, onSelectProje
         disabled={disabled}
         title="Adicionar outro projeto à IDE"
       >
-        <span>＋</span><strong>Projeto</strong>
+        <span>＋</span><strong>{workspace.runtimeAvailable || workspace.directAccessSupported ? "Projeto" : "Importar"}</strong>
       </button>
 
       {open ? (
         <div className="ide-project-menu" role="dialog" aria-label="Projetos da IDE">
           <div className="ide-project-menu-head">
             <div>
-              <span>Workspaces locais</span>
+              <span>{workspace.runtimeAvailable ? "Host Workspaces" : workspace.directAccessSupported ? "Workspaces da IDE" : "Browser Workspaces"}</span>
               <strong>Trocar projeto</strong>
               <small>O contexto, abas e alterações ficam isolados por projeto.</small>
             </div>
-            <button type="button" onClick={addProject} disabled={disabled}><span>＋</span> Adicionar</button>
+            <button type="button" onClick={addProject} disabled={disabled}><span>＋</span> {workspace.runtimeAvailable || workspace.directAccessSupported ? "Adicionar" : "Importar"}</button>
           </div>
 
           {projects.length >= 6 ? (
@@ -149,6 +152,7 @@ export default function ProjectSwitcher({ workspace, onAddProject, onSelectProje
                     <span className="ide-project-item-copy">
                       <span className="ide-project-item-title">
                         <strong>{project.name}</strong>
+                        <i className={`ide-project-mode mode-${project.mode === "portable" ? "portable" : project.mode === "runtime" ? "runtime" : "direct"}`}>{projectMode(project)}</i>
                         {active ? <em>Ativo</em> : null}
                       </span>
                       <small>{projectMeta(project)}</small>
@@ -167,8 +171,8 @@ export default function ProjectSwitcher({ workspace, onAddProject, onSelectProje
           </div>
 
           <div className="ide-project-menu-foot">
-            <span><i /> read/write</span>
-            <small>Trocar de projeto não descarta o estado dos demais workspaces.</small>
+            <span><i /> {workspace.runtimeAvailable ? "host runtime + browser" : workspace.directAccessSupported ? "local + browser" : "browser workspace"}</span>
+            <small>{workspace.runtimeAvailable ? "Host workspaces gravam no filesystem real e habilitam terminal real. Browser workspaces continuam disponíveis como cópia portátil." : workspace.directAccessSupported ? "Pastas locais usam acesso direto; workspaces portáteis ficam isolados no navegador." : "Neste navegador, importe por arrastar pasta ou ZIP. A cópia editável fica no armazenamento privado da IDE."}</small>
           </div>
         </div>
       ) : null}

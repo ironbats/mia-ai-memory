@@ -19,7 +19,7 @@ export default function IdeViewOptions({ layout, onLayoutChange, explorerHidden,
       <button aria-pressed={!explorerHidden} onClick={onToggleExplorer}>{explorerHidden ? "Mostrar" : "Recolher"} explorador <kbd>Ctrl+B</kbd></button>
       <button aria-pressed={panelOpen} onClick={onTogglePanel}>{panelOpen ? "Recolher" : "Mostrar"} painel inferior <kbd>Ctrl+J</kbd></button>
       <strong>Escala da IDE</strong>
-      <div className="ide-view-presets"><button disabled={zoom <= 90} onClick={() => onZoom(-1)}>−</button><button onClick={onResetZoom}>{zoom}%</button><button disabled={zoom >= 130} onClick={() => onZoom(1)}>+</button></div>
+      <div className="ide-view-presets"><button disabled={zoom <= 90} onClick={() => onZoom(-1)}>−</button><button onClick={onResetZoom}>{zoom}%</button><button disabled={zoom >= 140} onClick={() => onZoom(1)}>+</button></div>
       <button onClick={onReset}>Restaurar layout e escala</button>
     </div>
   </details>

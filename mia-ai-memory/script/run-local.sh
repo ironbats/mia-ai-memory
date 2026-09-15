@@ -6,6 +6,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$PROJECT_ROOT/docker/docker-compose.yml"
 ENV_FILE="$PROJECT_ROOT/docker/.env"
 ENV_EXAMPLE="$PROJECT_ROOT/docker/cognitive.env.example"
+WORKSPACE_RUNTIME_SCRIPT="$PROJECT_ROOT/script/workspace-runtime.sh"
 
 fail() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -54,6 +55,18 @@ if [[ -z "$(env_value COGNITIVE_CREDENTIALS_MASTER_KEY_BASE64)" ]]; then
   [[ -n "$MASTER_KEY" ]] || fail "Nao foi possivel gerar a chave mestra de credenciais."
   set_env_value COGNITIVE_CREDENTIALS_MASTER_KEY_BASE64 "$MASTER_KEY"
   printf 'Chave mestra local do cofre de credenciais gerada em %s.\n' "$ENV_FILE"
+fi
+
+WORKSPACE_RUNTIME_READY=false
+if [[ -f "$WORKSPACE_RUNTIME_SCRIPT" ]]; then
+  chmod +x "$WORKSPACE_RUNTIME_SCRIPT" 2>/dev/null || true
+  if "$WORKSPACE_RUNTIME_SCRIPT" start; then
+    WORKSPACE_RUNTIME_READY=true
+  else
+    printf 'AVISO: Workspace Runtime local nao iniciou. O backend continuara disponivel, mas escrita fisica e terminal real da IDE ficarao desabilitados.\n' >&2
+  fi
+else
+  printf 'AVISO: Workspace Runtime nao encontrado em %s. O backend continuara sem terminal real da IDE.\n' "$WORKSPACE_RUNTIME_SCRIPT" >&2
 fi
 
 COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
@@ -112,5 +125,10 @@ printf 'AI Memory Core: http://%s\n' "$CORE_ADDRESS"
 printf 'Cognitive API: http://%s\n' "$API_ADDRESS"
 printf 'Cognitive API health: http://%s/healthz\n' "$API_ADDRESS"
 printf 'Credential Vault: configurado com chave AES-256-GCM persistida no docker/.env\n'
+if [[ "$WORKSPACE_RUNTIME_READY" == "true" ]]; then
+  printf 'Workspace Runtime: http://127.0.0.1:%s\n' "${AI_MEMORY_WORKSPACE_RUNTIME_PORT:-8791}"
+else
+  printf 'Workspace Runtime: indisponivel; Browser Workspace continua funcional.\n'
+fi
 printf '\nPara acompanhar logs:\n'
 printf 'docker compose --env-file "%s" -f "%s" logs -f\n' "$ENV_FILE" "$COMPOSE_FILE"

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { listWorkspaceProjects, readActiveWorkspaceProjectId, removeWorkspaceProject as removeWorkspaceProjectRecord, sameWorkspaceHandle, saveActiveWorkspaceProjectId, saveWorkspaceProject } from "../lib/workspaceProjectRegistry.js"
+import { deletePortableWorkspace, importPortableWorkspaceFromDrop, importPortableWorkspaceFromFileList, importPortableWorkspaceFromHandle, importPortableWorkspaceFromZip, openPortableWorkspace, portableWorkspaceSupported } from "../lib/portableWorkspace.js"
+import { openRuntimeWorkspace, workspaceRuntime } from "../lib/workspaceRuntime.js"
 
 const MAX_TREE_FILES = 5000
 const MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -85,6 +87,42 @@ const readHandleFile = async (directoryHandle, filePath) => {
   return (await handle.getFile()).text()
 }
 
+const fileHandleFromRoot = async (rootHandle, filePath, create = false) => {
+  const normalized = safeRelativePath(filePath)
+  const segments = normalized.split("/").filter(Boolean)
+  let directory = rootHandle
+  for (const segment of segments.slice(0, -1)) directory = await directory.getDirectoryHandle(segment, { create })
+  return directory.getFileHandle(segments[segments.length - 1], { create })
+}
+
+const readTextFromRoot = async (rootHandle, filePath) => {
+  try {
+    const handle = await fileHandleFromRoot(rootHandle, filePath, false)
+    const file = await handle.getFile()
+    if (await looksBinary(file)) throw new Error(`Arquivo binário não pode ser sincronizado automaticamente: ${filePath}`)
+    if (file.size > MAX_FILE_BYTES) throw new Error(`Arquivo excede o limite do editor: ${filePath}`)
+    return { exists: true, content: await file.text() }
+  } catch (error) {
+    if (error?.name === "NotFoundError" || error?.status === 404) return { exists: false, content: "" }
+    throw error
+  }
+}
+
+const writeTextToRoot = async (rootHandle, filePath, content) => {
+  const handle = await fileHandleFromRoot(rootHandle, filePath, true)
+  const writable = await handle.createWritable()
+  await writable.write(String(content ?? ""))
+  await writable.close()
+}
+
+const removePathFromRoot = async (rootHandle, filePath) => {
+  const normalized = safeRelativePath(filePath)
+  const segments = normalized.split("/").filter(Boolean)
+  let directory = rootHandle
+  for (const segment of segments.slice(0, -1)) directory = await directory.getDirectoryHandle(segment)
+  await directory.removeEntry(segments[segments.length - 1], { recursive: false })
+}
+
 const detectGit = async rootHandle => {
   if (!rootHandle) return { repository: false, branch: "", head: "", detached: false, worktree: false }
   try {
@@ -121,7 +159,8 @@ const detectGit = async rootHandle => {
 }
 
 export default function useLocalWorkspace() {
-  const supported = typeof window !== "undefined" && typeof window.showDirectoryPicker === "function"
+  const directAccessSupported = typeof window !== "undefined" && typeof window.showDirectoryPicker === "function"
+  const portableAccessSupported = portableWorkspaceSupported()
   const [rootHandle, setRootHandle] = useState(null)
   const [rootName, setRootName] = useState("")
   const [tree, setTree] = useState([])
@@ -145,6 +184,9 @@ export default function useLocalWorkspace() {
   const [projectRegistryReady, setProjectRegistryReady] = useState(false)
   const [projectRegistryPersistent, setProjectRegistryPersistent] = useState(true)
   const [workspaceBusy, setWorkspaceBusy] = useState(false)
+  const [runtimeAvailable, setRuntimeAvailable] = useState(false)
+  const [runtimeGitChanges, setRuntimeGitChanges] = useState([])
+  const supported = directAccessSupported || portableAccessSupported || runtimeAvailable
   const fileHandlesRef = useRef(new Map())
   const directoryHandlesRef = useRef(new Map())
   const tabsRef = useRef([])
@@ -155,6 +197,21 @@ export default function useLocalWorkspace() {
   const projectSessionsRef = useRef(new Map())
   const workspaceOperationsRef = useRef(0)
   const projectTransitionRef = useRef(false)
+
+  useEffect(() => {
+    let cancelled = false
+    let timer = null
+    const probe = async () => {
+      const health = await workspaceRuntime.health()
+      if (!cancelled) setRuntimeAvailable(Boolean(health.available))
+      if (!cancelled) timer = window.setTimeout(probe, health.available ? 10000 : 4000)
+    }
+    probe()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [])
 
   const runWorkspaceOperation = useCallback(async operation => {
     if (projectTransitionRef.current) throw new Error("Aguarde a troca de projeto terminar antes de executar esta ação.")
@@ -290,8 +347,14 @@ export default function useLocalWorkspace() {
     setWorkspaceSession(current => current + 1)
   }, [])
 
-  const ensureDirectoryPermission = useCallback(async (handle, request = true) => {
+  const ensureDirectoryPermission = useCallback(async (handle, request = true, mode = "direct") => {
     if (!handle) return "denied"
+    if (mode === "portable") return "granted"
+    if (mode === "runtime") {
+      const health = await workspaceRuntime.health()
+      setRuntimeAvailable(Boolean(health.available))
+      return health.available ? "granted" : "prompt"
+    }
     let permission = "prompt"
     if (typeof handle.queryPermission === "function") {
       try {
@@ -345,7 +408,8 @@ export default function useLocalWorkspace() {
       setTree(nextTree)
       setFilePaths(sortedPaths)
       setRootHandle(handle)
-      setRootName(handle.name || "workspace")
+      const targetProject = targetProjectId ? projectsRef.current.find(project => project.id === targetProjectId) : null
+      setRootName(targetProject?.name || handle.name || "workspace")
       setGitRepository(git.repository)
       setGitBranch(git.branch)
       setGitHead(git.head)
@@ -386,7 +450,7 @@ export default function useLocalWorkspace() {
       if (targetProjectId) {
         commitProjects(values => values.map(project => project.id === targetProjectId ? {
           ...project,
-          name: handle.name || project.name,
+          name: project.name || handle.name || "workspace",
           fileCount: sortedPaths.length,
           dirtyCount: resetWorkspace ? 0 : tabsRef.current.filter(tab => tab.dirty).length,
           gitRepository: git.repository,
@@ -415,7 +479,7 @@ export default function useLocalWorkspace() {
     setProjectSwitching(true)
     setError("")
     try {
-      const permission = await ensureDirectoryPermission(target.handle, true)
+      const permission = await ensureDirectoryPermission(target.handle, true, target.mode)
       commitProjects(values => values.map(project => project.id === targetId ? { ...project, permission } : project))
       if (permission !== "granted") throw new Error(`Acesso de leitura e escrita ao projeto ${target.name} não foi autorizado.`)
       activeProjectIdRef.current = targetId
@@ -425,7 +489,7 @@ export default function useLocalWorkspace() {
       if (snapshot?.handle) restoreWorkspaceSession(snapshot)
       else await scan(target.handle, true, targetId)
       const lastOpenedAt = new Date().toISOString()
-      const persisted = { ...target, name: target.handle.name || target.name, lastOpenedAt, permission: "granted" }
+      const persisted = { ...target, name: target.name || target.handle.name || "workspace", lastOpenedAt, permission: "granted" }
       commitProjects(values => values.map(project => project.id === targetId ? { ...project, ...persisted } : project))
       saveWorkspaceProject(persisted).catch(() => setProjectRegistryPersistent(false))
       return persisted
@@ -449,7 +513,7 @@ export default function useLocalWorkspace() {
   }, [captureActiveProject, clearWorkspace, commitProjects, ensureDirectoryPermission, restoreWorkspaceSession, rootHandle, scan])
 
   const selectDirectory = useCallback(async () => {
-    if (!supported) throw new Error("Seu navegador não oferece File System Access API. Use Chrome ou Edge recente para editar arquivos locais.")
+    if (!directAccessSupported) throw new Error("Este navegador não oferece acesso direto a pastas. Use o importador Browser Workspace da IDE.")
     if (!projectRegistryReady) throw new Error("Aguarde a IDE carregar o registro local de projetos antes de adicionar outra pasta.")
     if (workspaceOperationsRef.current) throw new Error("Aguarde a operação atual da IDE terminar antes de adicionar outro projeto.")
     projectTransitionRef.current = true
@@ -457,10 +521,12 @@ export default function useLocalWorkspace() {
     setError("")
     try {
       const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "ai-memory-local-workspace" })
-      const permission = await ensureDirectoryPermission(handle, true)
+      const permission = await ensureDirectoryPermission(handle, true, "direct")
       if (permission !== "granted") throw new Error("Acesso de leitura e escrita à pasta não foi autorizado.")
+      const name = handle.name || "workspace"
       let existing = null
       for (const project of projectsRef.current) {
+        if (project.mode === "portable") continue
         if (await sameWorkspaceHandle(project.handle, handle)) {
           existing = project
           break
@@ -472,12 +538,15 @@ export default function useLocalWorkspace() {
         await switchProject(existing.id)
         return existing.handle
       }
+
       captureActiveProject()
       const now = new Date().toISOString()
       const project = {
         id: crypto.randomUUID(),
-        name: handle.name || "workspace",
+        name,
         handle,
+        mode: "direct",
+        storageKey: "",
         createdAt: now,
         lastOpenedAt: now,
         permission: "granted",
@@ -498,7 +567,298 @@ export default function useLocalWorkspace() {
       projectTransitionRef.current = false
       setProjectSwitching(false)
     }
-  }, [captureActiveProject, commitProjects, ensureDirectoryPermission, projectRegistryReady, scan, supported, switchProject])
+  }, [captureActiveProject, commitProjects, directAccessSupported, ensureDirectoryPermission, projectRegistryReady, scan, switchProject])
+
+  const registerRuntimeWorkspace = useCallback(async runtimeWorkspace => {
+    if (!runtimeWorkspace?.id) throw new Error("O Workspace Runtime não retornou um projeto válido.")
+    if (!projectRegistryReady) throw new Error("Aguarde a IDE carregar o registro local de projetos antes de adicionar outro projeto.")
+    if (workspaceOperationsRef.current) throw new Error("Aguarde a operação atual da IDE terminar antes de adicionar outro projeto.")
+    const existing = projectsRef.current.find(project => project.mode === "runtime" && project.runtimeWorkspaceId === runtimeWorkspace.id)
+    if (existing) {
+      await switchProject(existing.id)
+      return existing.handle
+    }
+    const handle = openRuntimeWorkspace(runtimeWorkspace.id, runtimeWorkspace.name)
+    if (!handle) throw new Error("Não foi possível montar o projeto físico pelo Workspace Runtime.")
+    captureActiveProject()
+    const now = new Date().toISOString()
+    const project = {
+      id: crypto.randomUUID(),
+      name: runtimeWorkspace.name || handle.name || "workspace",
+      handle,
+      mode: "runtime",
+      runtimeWorkspaceId: runtimeWorkspace.id,
+      storageKey: "",
+      createdAt: now,
+      lastOpenedAt: now,
+      permission: "granted",
+      fileCount: 0,
+      dirtyCount: 0,
+      gitRepository: Boolean(runtimeWorkspace.git?.repository),
+      gitBranch: runtimeWorkspace.git?.branch || "",
+      loaded: false
+    }
+    commitProjects(values => [...values, project])
+    activeProjectIdRef.current = project.id
+    setActiveProjectId(project.id)
+    saveActiveWorkspaceProjectId(project.id)
+    await saveWorkspaceProject(project).catch(() => setProjectRegistryPersistent(false))
+    await scan(handle, true, project.id)
+    setRuntimeAvailable(true)
+    return handle
+  }, [captureActiveProject, commitProjects, projectRegistryReady, scan, switchProject])
+
+  const selectRuntimeDirectory = useCallback(async () => {
+    const health = await workspaceRuntime.health()
+    setRuntimeAvailable(Boolean(health.available))
+    if (!health.available) {
+      const error = new Error("Workspace Runtime local não está disponível. Inicie o backend com script/run-local.sh para habilitar escrita física e terminal real.")
+      error.code = "WORKSPACE_RUNTIME_OFFLINE"
+      throw error
+    }
+    const runtimeWorkspace = await workspaceRuntime.pick()
+    return registerRuntimeWorkspace(runtimeWorkspace)
+  }, [registerRuntimeWorkspace])
+
+  const registerRuntimePath = useCallback(async pathValue => {
+    const health = await workspaceRuntime.health()
+    setRuntimeAvailable(Boolean(health.available))
+    if (!health.available) {
+      const error = new Error("Workspace Runtime local não está disponível. Inicie o backend com script/run-local.sh para habilitar escrita física e terminal real.")
+      error.code = "WORKSPACE_RUNTIME_OFFLINE"
+      throw error
+    }
+    const runtimeWorkspace = await workspaceRuntime.registerPath(pathValue)
+    return registerRuntimeWorkspace(runtimeWorkspace)
+  }, [registerRuntimeWorkspace])
+
+  const promotePortableProjectToRuntime = useCallback(async runtimeWorkspace => runWorkspaceOperation(async () => {
+    const currentProject = projectsRef.current.find(project => project.id === activeProjectIdRef.current)
+    if (!currentProject || currentProject.mode !== "portable") throw new Error("O projeto ativo não é um Browser Workspace.")
+    if (!runtimeWorkspace?.id) throw new Error("O Workspace Runtime não retornou um projeto físico válido.")
+    if (String(runtimeWorkspace.name || "").trim().toLowerCase() !== String(currentProject.name || rootName || "").trim().toLowerCase()) {
+      const error = new Error(`A pasta física selecionada é “${runtimeWorkspace.name}”, mas o Browser Workspace ativo é “${currentProject.name || rootName}”. Selecione a pasta física correspondente ao mesmo projeto.`)
+      error.code = "WORKSPACE_NAME_MISMATCH"
+      throw error
+    }
+    const runtimeHandle = openRuntimeWorkspace(runtimeWorkspace.id, runtimeWorkspace.name)
+    if (!runtimeHandle) throw new Error("Não foi possível montar o projeto físico pelo Workspace Runtime.")
+    let trackedChanges = [...sessionChangesRef.current]
+    if (!trackedChanges.length) {
+      const git = runtimeWorkspace.git || await workspaceRuntime.gitStatus(runtimeWorkspace.id)
+      const discovered = []
+      for (const path of filePaths) {
+        const portableHandle = fileHandlesRef.current.get(path)
+        if (!portableHandle) continue
+        try {
+          const portableFile = await portableHandle.getFile()
+          if (portableFile.size > MAX_FILE_BYTES || await looksBinary(portableFile)) continue
+          const portableContent = await portableFile.text()
+          const physical = await readTextFromRoot(runtimeHandle, path)
+          if (!physical.exists || physical.content !== portableContent) {
+            discovered.push({
+              path,
+              before: physical.content,
+              beforeExists: physical.exists,
+              after: portableContent,
+              afterExists: true,
+              origin: "portable-sync",
+              updatedAt: new Date().toISOString()
+            })
+          }
+        } catch {
+        }
+      }
+      if (discovered.length && Array.isArray(git.changes) && git.changes.length) {
+        const error = new Error(`A pasta física possui ${git.changes.length} alteração(ões) Git e o Browser Workspace também diverge do disco. Faça commit/stash das mudanças físicas antes de sincronizar para evitar sobrescrita.`)
+        error.code = "WORKSPACE_CONFLICT"
+        error.conflicts = git.changes.slice(0, 40).map(item => ({ path: item.path, expected: "working tree limpo para sincronização automática", actual: item.status }))
+        throw error
+      }
+      trackedChanges = discovered
+    }
+    const conflicts = []
+    const physicalState = new Map()
+    for (const change of trackedChanges) {
+      const current = await readTextFromRoot(runtimeHandle, change.path)
+      physicalState.set(change.path, current)
+      if (current.exists !== Boolean(change.beforeExists) || (current.exists && current.content !== String(change.before ?? ""))) {
+        conflicts.push({ path: change.path, expected: change.beforeExists ? "conteúdo original importado" : "arquivo inexistente", actual: current.exists ? "arquivo físico divergente" : "arquivo físico ausente" })
+      }
+    }
+    if (conflicts.length) {
+      const error = new Error(`Não foi possível sincronizar ${conflicts.length} alteração(ões) com a pasta física porque o projeto mudou fora da IDE. Revise o Git e tente novamente.`)
+      error.code = "WORKSPACE_CONFLICT"
+      error.conflicts = conflicts
+      throw error
+    }
+    const applied = []
+    try {
+      for (const change of trackedChanges) {
+        if (change.afterExists) await writeTextToRoot(runtimeHandle, change.path, change.after)
+        else if (physicalState.get(change.path)?.exists) await removePathFromRoot(runtimeHandle, change.path)
+        applied.push(change)
+      }
+    } catch (error) {
+      for (const change of [...applied].reverse()) {
+        const before = physicalState.get(change.path)
+        try {
+          if (before?.exists) await writeTextToRoot(runtimeHandle, change.path, before.content)
+          else {
+            const current = await readTextFromRoot(runtimeHandle, change.path)
+            if (current.exists) await removePathFromRoot(runtimeHandle, change.path)
+          }
+        } catch {
+        }
+      }
+      throw new Error(`Falha ao sincronizar Browser Workspace com a pasta física; rollback executado: ${error.message || error}`)
+    }
+
+    const storageKey = currentProject.storageKey || ""
+    const promoted = {
+      ...currentProject,
+      name: runtimeWorkspace.name || currentProject.name,
+      handle: runtimeHandle,
+      mode: "runtime",
+      runtimeWorkspaceId: runtimeWorkspace.id,
+      storageKey: "",
+      permission: "granted",
+      gitRepository: Boolean(runtimeWorkspace.git?.repository),
+      gitBranch: runtimeWorkspace.git?.branch || "",
+      lastOpenedAt: new Date().toISOString()
+    }
+    commitProjects(values => values.map(project => project.id === currentProject.id ? promoted : project))
+    projectSessionsRef.current.delete(currentProject.id)
+    await saveWorkspaceProject(promoted).catch(() => setProjectRegistryPersistent(false))
+    setRuntimeAvailable(true)
+    await scan(runtimeHandle, false, currentProject.id)
+    if (storageKey) await deletePortableWorkspace(storageKey)
+    return { project: promoted, syncedChanges: trackedChanges.length }
+  }), [commitProjects, filePaths, rootName, runWorkspaceOperation, scan])
+
+  const connectPortableProjectToRuntime = useCallback(async pathValue => {
+    const health = await workspaceRuntime.health()
+    setRuntimeAvailable(Boolean(health.available))
+    if (!health.available) {
+      const error = new Error("Workspace Runtime local não está disponível. Inicie o backend com script/run-local.sh para sincronizar o Browser Workspace com a pasta física.")
+      error.code = "WORKSPACE_RUNTIME_OFFLINE"
+      throw error
+    }
+    const runtimeWorkspace = pathValue ? await workspaceRuntime.registerPath(pathValue) : await workspaceRuntime.pick()
+    return promotePortableProjectToRuntime(runtimeWorkspace)
+  }, [promotePortableProjectToRuntime])
+
+  const promoteDirectProjectToRuntime = useCallback(async runtimeWorkspace => runWorkspaceOperation(async () => {
+    const currentProject = projectsRef.current.find(project => project.id === activeProjectIdRef.current)
+    if (!currentProject || currentProject.mode !== "direct") throw new Error("O projeto ativo não usa acesso direto do navegador.")
+    if (!runtimeWorkspace?.id) throw new Error("O Workspace Runtime não retornou um projeto físico válido.")
+    if (String(runtimeWorkspace.name || "").trim().toLowerCase() !== String(currentProject.name || rootName || "").trim().toLowerCase()) {
+      const error = new Error(`A pasta física selecionada é “${runtimeWorkspace.name}”, mas o projeto ativo é “${currentProject.name || rootName}”. Selecione a mesma pasta para habilitar o terminal HOST RW.`)
+      error.code = "WORKSPACE_NAME_MISMATCH"
+      throw error
+    }
+    const runtimeGit = runtimeWorkspace.git || await workspaceRuntime.gitStatus(runtimeWorkspace.id)
+    if (gitRepository && runtimeGit.repository && gitHead && runtimeGit.head && gitHead !== runtimeGit.head) {
+      const error = new Error("A pasta escolhida possui outro HEAD Git. Selecione exatamente o mesmo projeto físico que já está aberto na IDE.")
+      error.code = "WORKSPACE_CONFLICT"
+      error.conflicts = [{ path: ".git/HEAD", expected: gitHead, actual: runtimeGit.head }]
+      throw error
+    }
+    const runtimeHandle = openRuntimeWorkspace(runtimeWorkspace.id, runtimeWorkspace.name)
+    if (!runtimeHandle) throw new Error("Não foi possível montar o projeto físico pelo Workspace Runtime.")
+    const promoted = {
+      ...currentProject,
+      name: runtimeWorkspace.name || currentProject.name,
+      handle: runtimeHandle,
+      mode: "runtime",
+      runtimeWorkspaceId: runtimeWorkspace.id,
+      storageKey: "",
+      permission: "granted",
+      gitRepository: Boolean(runtimeGit.repository),
+      gitBranch: runtimeGit.branch || "",
+      lastOpenedAt: new Date().toISOString()
+    }
+    commitProjects(values => values.map(project => project.id === currentProject.id ? promoted : project))
+    projectSessionsRef.current.delete(currentProject.id)
+    await saveWorkspaceProject(promoted).catch(() => setProjectRegistryPersistent(false))
+    setRuntimeAvailable(true)
+    await scan(runtimeHandle, false, currentProject.id)
+    return { project: promoted, syncedChanges: 0 }
+  }), [commitProjects, gitHead, gitRepository, rootName, runWorkspaceOperation, scan])
+
+  const connectDirectProjectToRuntime = useCallback(async pathValue => {
+    const health = await workspaceRuntime.health()
+    setRuntimeAvailable(Boolean(health.available))
+    if (!health.available) {
+      const error = new Error("Workspace Runtime local não está disponível. Inicie o backend com script/run-local.sh para habilitar terminal real no projeto físico.")
+      error.code = "WORKSPACE_RUNTIME_OFFLINE"
+      throw error
+    }
+    const runtimeWorkspace = pathValue ? await workspaceRuntime.registerPath(pathValue) : await workspaceRuntime.pick()
+    return promoteDirectProjectToRuntime(runtimeWorkspace)
+  }, [promoteDirectProjectToRuntime])
+
+  const importPortableProject = useCallback(async source => {
+    if (!portableAccessSupported) throw new Error("Este navegador não oferece armazenamento privado compatível com o Browser Workspace.")
+    if (!projectRegistryReady) throw new Error("Aguarde a IDE carregar o registro local de projetos antes de importar outro projeto.")
+    if (workspaceOperationsRef.current) throw new Error("Aguarde a operação atual da IDE terminar antes de importar outro projeto.")
+    const kind = source?.kind === "zip" ? "zip" : source?.kind === "drop" ? "drop" : source?.kind === "files" ? "files" : source?.kind === "handle" ? "handle" : ""
+    if (!kind) throw new Error("Origem de importação inválida.")
+    if (kind === "zip" && !source?.file) throw new Error("Selecione um arquivo ZIP válido.")
+    if (kind === "drop" && !source?.dataTransfer) throw new Error("Arraste a pasta raiz do projeto para a área de importação.")
+    if (kind === "files" && !source?.files?.length) throw new Error("Selecione a pasta raiz do projeto.")
+    if (kind === "handle" && source?.handle?.kind !== "directory") throw new Error("Selecione uma pasta raiz válida.")
+
+    projectTransitionRef.current = true
+    setProjectSwitching(true)
+    setError("")
+    let imported = null
+    let registered = false
+    try {
+      imported = kind === "zip"
+        ? await importPortableWorkspaceFromZip(source.file)
+        : kind === "files"
+          ? await importPortableWorkspaceFromFileList(source.files)
+          : kind === "handle"
+            ? await importPortableWorkspaceFromHandle(source.handle)
+            : await importPortableWorkspaceFromDrop(source.dataTransfer)
+      const handle = imported.handle
+      const name = imported.name || handle?.name || "workspace"
+      if (!handle) throw new Error("O projeto foi importado, mas o Browser Workspace não conseguiu montar o filesystem virtual.")
+
+      captureActiveProject()
+      const now = new Date().toISOString()
+      const project = {
+        id: crypto.randomUUID(),
+        name,
+        handle,
+        mode: "portable",
+        storageKey: imported.storageKey || "",
+        createdAt: now,
+        lastOpenedAt: now,
+        permission: "granted",
+        fileCount: Number(imported.fileCount || 0),
+        dirtyCount: 0,
+        gitRepository: false,
+        gitBranch: "",
+        loaded: false
+      }
+      commitProjects(values => [...values, project])
+      registered = true
+      activeProjectIdRef.current = project.id
+      setActiveProjectId(project.id)
+      saveActiveWorkspaceProjectId(project.id)
+      await saveWorkspaceProject(project).catch(() => setProjectRegistryPersistent(false))
+      await scan(handle, true, project.id)
+      return handle
+    } catch (error) {
+      if (imported?.storageKey && !registered) await deletePortableWorkspace(imported.storageKey)
+      throw error
+    } finally {
+      projectTransitionRef.current = false
+      setProjectSwitching(false)
+    }
+  }, [captureActiveProject, commitProjects, portableAccessSupported, projectRegistryReady, scan])
 
   const removeProject = useCallback(async projectId => {
     if (workspaceOperationsRef.current) throw new Error("Aguarde a operação atual da IDE terminar antes de remover um projeto.")
@@ -506,11 +866,13 @@ export default function useLocalWorkspace() {
     const currentProjects = projectsRef.current
     const index = currentProjects.findIndex(project => project.id === targetId)
     if (index < 0) return false
+    const target = currentProjects[index]
     const wasActive = activeProjectIdRef.current === targetId
     projectSessionsRef.current.delete(targetId)
     const remaining = currentProjects.filter(project => project.id !== targetId)
     commitProjects(remaining)
     removeWorkspaceProjectRecord(targetId).catch(() => setProjectRegistryPersistent(false))
+    if (target.mode === "portable" && target.storageKey) await deletePortableWorkspace(target.storageKey)
     if (!wasActive) return true
     activeProjectIdRef.current = ""
     setActiveProjectId("")
@@ -534,11 +896,20 @@ export default function useLocalWorkspace() {
         const ordered = [...records].sort((left, right) => String(right.lastOpenedAt || "").localeCompare(String(left.lastOpenedAt || "")))
         const hydrated = []
         for (const record of ordered) {
-          if (!record?.id || !record?.handle) continue
-          const permission = await ensureDirectoryPermission(record.handle, false)
+          if (!record?.id) continue
+          const mode = record.mode === "portable" ? "portable" : record.mode === "runtime" ? "runtime" : "direct"
+          const handle = mode === "portable"
+            ? await openPortableWorkspace(record.storageKey)
+            : mode === "runtime"
+              ? openRuntimeWorkspace(record.runtimeWorkspaceId, record.name)
+              : record.handle
+          if (!handle) continue
+          const permission = await ensureDirectoryPermission(handle, false, mode)
           hydrated.push({
             ...record,
-            name: record.name || record.handle.name || "workspace",
+            handle,
+            mode,
+            name: record.name || handle.name || "workspace",
             permission,
             fileCount: 0,
             dirtyCount: 0,
@@ -591,8 +962,22 @@ export default function useLocalWorkspace() {
   useEffect(() => {
     if (!rootHandle) return undefined
     let disposed = false
+    let timer = null
     const refreshGitState = async () => {
       try {
+        const activeProject = projectsRef.current.find(project => project.id === activeProjectIdRef.current)
+        if (activeProject?.mode === "runtime" && activeProject.runtimeWorkspaceId) {
+          const git = await workspaceRuntime.gitStatus(activeProject.runtimeWorkspaceId)
+          if (disposed) return
+          setRuntimeAvailable(true)
+          setGitRepository(Boolean(git.repository))
+          setGitBranch(git.branch || "")
+          setGitHead(git.head || "")
+          setGitDetached(Boolean(git.repository && !git.branch))
+          setGitWorktree(false)
+          setRuntimeGitChanges(Array.isArray(git.changes) ? git.changes : [])
+          return
+        }
         const git = await detectGit(rootHandle)
         if (disposed) return
         setGitRepository(git.repository)
@@ -600,15 +985,22 @@ export default function useLocalWorkspace() {
         setGitHead(git.head)
         setGitDetached(git.detached)
         setGitWorktree(git.worktree)
+        setRuntimeGitChanges([])
       } catch {
+        const activeProject = projectsRef.current.find(project => project.id === activeProjectIdRef.current)
+        if (activeProject?.mode === "runtime" && !disposed) setRuntimeAvailable(false)
       }
     }
-    const timer = window.setInterval(refreshGitState, 4000)
+    const tick = async () => {
+      await refreshGitState()
+      if (!disposed) timer = window.setTimeout(tick, 3000)
+    }
+    tick()
     return () => {
       disposed = true
-      window.clearInterval(timer)
+      if (timer) window.clearTimeout(timer)
     }
-  }, [rootHandle])
+  }, [rootHandle, activeProjectId])
 
   const readPath = useCallback(async path => {
     const expectedProjectId = activeProjectId
@@ -959,8 +1351,36 @@ export default function useLocalWorkspace() {
     tabsRef.current = nextTabs
     setTabs(nextTabs)
     setActivePath(current => nextTabs.some(tab => tab.path === current) ? current : nextTabs[0]?.path || "")
-    return { status: "applied", projectId: activeProjectIdRef.current || null, workspace: rootName, branch: gitBranch || null, files: applied, appliedAt: new Date().toISOString() }
+    const activeProject = projectsRef.current.find(project => project.id === activeProjectIdRef.current)
+    return { status: "applied", projectId: activeProjectIdRef.current || null, workspace: rootName, workspaceMode: activeProject?.mode || "", branch: gitBranch || null, files: applied, appliedAt: new Date().toISOString() }
   }), [gitBranch, readCurrentDisk, readPath, removePath, rootHandle, rootName, runWorkspaceOperation, scan, trackChange, writePath])
+
+  const activeRuntimeWorkspaceId = useMemo(() => {
+    const project = projects.find(item => item.id === activeProjectId)
+    return project?.mode === "runtime" ? project.runtimeWorkspaceId || "" : ""
+  }, [activeProjectId, projects])
+
+  const executeTerminalCommand = useCallback(async command => {
+    if (!activeRuntimeWorkspaceId) {
+      const error = new Error("O terminal real exige um projeto HOST RW conectado ao Workspace Runtime. Reimporte o projeto usando o runtime local para executar Git, builds e aplicações no sistema operacional.")
+      error.code = "TERMINAL_RUNTIME_REQUIRED"
+      throw error
+    }
+    const result = await workspaceRuntime.execute(activeRuntimeWorkspaceId, command)
+    setRuntimeAvailable(true)
+    return result
+  }, [activeRuntimeWorkspaceId])
+
+  const pollTerminalSession = useCallback(async (sessionId, cursor = 0) => {
+    if (!activeRuntimeWorkspaceId) throw new Error("Workspace Runtime indisponível para o projeto ativo.")
+    return workspaceRuntime.poll(activeRuntimeWorkspaceId, sessionId, cursor)
+  }, [activeRuntimeWorkspaceId])
+
+  const stopTerminalSession = useCallback(async sessionId => {
+    if (!activeRuntimeWorkspaceId) return false
+    const result = await workspaceRuntime.stop(activeRuntimeWorkspaceId, sessionId)
+    return Boolean(result.stopped)
+  }, [activeRuntimeWorkspaceId])
 
   const activeTab = useMemo(() => tabs.find(tab => tab.path === activePath) || null, [activePath, tabs])
   const dirtyCount = useMemo(() => tabs.filter(tab => tab.dirty).length, [tabs])
@@ -977,6 +1397,12 @@ export default function useLocalWorkspace() {
 
   return {
     supported,
+    directAccessSupported,
+    portableAccessSupported,
+    runtimeAvailable,
+    runtimeWorkspaceId: activeRuntimeWorkspaceId,
+    terminalRuntimeAvailable: Boolean(runtimeAvailable && activeRuntimeWorkspaceId),
+    workspaceMode: activeProject?.mode || "",
     isReady: Boolean(rootHandle),
     projects: projectItems,
     activeProjectId,
@@ -1003,9 +1429,15 @@ export default function useLocalWorkspace() {
     gitHeadShort: gitHead ? gitHead.slice(0, 8) : "",
     gitDetached,
     gitWorktree,
+    gitWorkingChanges: runtimeGitChanges,
     sessionChanges,
     setAutoApply,
     selectDirectory,
+    selectRuntimeDirectory,
+    registerRuntimePath,
+    connectPortableProjectToRuntime,
+    connectDirectProjectToRuntime,
+    importPortableProject,
     switchProject,
     removeProject,
     refresh,
@@ -1019,6 +1451,9 @@ export default function useLocalWorkspace() {
     createFile,
     toggleContext,
     buildAgentContext,
-    applyChangePlan
+    applyChangePlan,
+    executeTerminalCommand,
+    pollTerminalSession,
+    stopTerminalSession
   }
 }

@@ -426,6 +426,7 @@ export const chatService = {
     const result = {
       status,
       workspace: body.workspace ? String(body.workspace).slice(0, 180) : null,
+      workspaceMode: ["direct", "portable", "runtime"].includes(String(body.workspaceMode || "")) ? String(body.workspaceMode) : null,
       branch: body.branch ? String(body.branch).slice(0, 240) : null,
       files,
       conflicts,
@@ -445,7 +446,7 @@ export const chatService = {
           agent: message.agentName || "ai-memory-web-ide",
           sessionId: coreSessionId,
           model: message.model || "local-workspace",
-          userPrompt: `Local code change applied to ${result.workspace || message.metadata.codeChangePlan.workspace?.rootName || "workspace"}${result.branch ? ` on branch ${result.branch}` : ""}`,
+          userPrompt: `${result.workspaceMode === "portable" ? "Browser workspace" : result.workspaceMode === "runtime" ? "Physical host workspace" : "Local workspace"} code change applied to ${result.workspace || message.metadata.codeChangePlan.workspace?.rootName || "workspace"}${result.branch ? ` on branch ${result.branch}` : ""}`,
           assistantResponse: `${summary}${appliedFiles ? `\n\nApplied files:\n${appliedFiles}` : ""}`
         })
         updated = await chatRepository.updateMessage(messageId, { metadata: { codeChangeResult: { ...result, memoryCapture: "captured", coreSessionId, capture } } })

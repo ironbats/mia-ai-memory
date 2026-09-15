@@ -66,14 +66,21 @@ export const listWorkspaceProjects = async () => {
 }
 
 export const saveWorkspaceProject = async project => {
-  if (!project?.id || !project?.handle) return false
+  if (!project?.id) return false
+  const mode = project.mode === "portable" ? "portable" : project.mode === "runtime" ? "runtime" : "direct"
+  if (mode === "direct" && !project.handle) return false
+  if (mode === "portable" && !project.storageKey) return false
+  if (mode === "runtime" && !project.runtimeWorkspaceId) return false
   const record = {
     id: String(project.id),
-    name: String(project.name || project.handle.name || "workspace"),
-    handle: project.handle,
+    name: String(project.name || project.handle?.name || "workspace"),
+    mode,
     createdAt: String(project.createdAt || new Date().toISOString()),
     lastOpenedAt: String(project.lastOpenedAt || new Date().toISOString())
   }
+  if (mode === "direct") record.handle = project.handle
+  if (mode === "portable") record.storageKey = String(project.storageKey)
+  if (mode === "runtime") record.runtimeWorkspaceId = String(project.runtimeWorkspaceId)
   await transactionResult("readwrite", store => store.put(record))
   return true
 }

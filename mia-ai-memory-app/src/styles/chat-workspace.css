@@ -1,10 +1,10 @@
 .chat-workspace {
-  --chat-font-xs: 9px;
-  --chat-font-sm: 10px;
-  --chat-font-md: 11px;
-  --chat-font-lg: 12px;
-  --chat-font-body: 14px;
-  --chat-font-title: 15px;
+  --chat-font-xs: 10px;
+  --chat-font-sm: 11px;
+  --chat-font-md: 12px;
+  --chat-font-lg: 13px;
+  --chat-font-body: 15px;
+  --chat-font-title: 16px;
   --chat-control-height: 34px;
   --chat-avatar-size: 36px;
   grid-template-columns: 232px minmax(0, 1fr);
@@ -15,7 +15,7 @@
 }
 
 .chat-sidebar-head {
-  padding: 16px 14px 10px;
+  padding: 12px 12px 8px;
 }
 
 .chat-sidebar-head .eyebrow,
@@ -52,8 +52,8 @@
 
 .chat-conversation-item {
   gap: 5px 8px;
-  padding: 11px 10px;
-  border-radius: 10px;
+  padding: 9px 9px;
+  border-radius: 9px;
 }
 
 .chat-conversation-item strong {
@@ -85,9 +85,9 @@
 }
 
 .chat-toolbar {
-  min-height: 118px;
-  gap: 10px 14px;
-  padding: 14px 16px 12px;
+  min-height: 0;
+  gap: 8px 10px;
+  padding: 10px 12px 9px;
 }
 
 .chat-toolbar-title {
@@ -279,8 +279,8 @@
 }
 
 .chat-thread {
-  padding: 18px 22px 16px;
-  scroll-padding-bottom: 18px;
+  padding: 12px 14px 12px;
+  scroll-padding-bottom: 14px;
 }
 
 .chat-loading {
@@ -304,9 +304,9 @@
 
 .chat-message {
   width: min(1080px, 100%);
-  margin: 0 auto 17px;
+  margin: 0 auto 12px;
   grid-template-columns: var(--chat-avatar-size) minmax(0, 1fr);
-  gap: 12px;
+  gap: 9px;
 }
 
 .chat-message.user {
@@ -322,8 +322,8 @@
 }
 
 .chat-message-body > header {
-  min-height: 30px;
-  gap: 9px;
+  min-height: 26px;
+  gap: 7px;
 }
 
 .chat-message-body > header strong {
@@ -340,7 +340,7 @@
 
 .chat-rich-content {
   font-size: var(--chat-font-body);
-  line-height: 1.62;
+  line-height: 1.55;
 }
 
 .chat-rich-content.plain {
@@ -348,7 +348,7 @@
 }
 
 .chat-rich-content p {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .chat-rich-content h2 {
@@ -419,8 +419,8 @@
 }
 
 .chat-composer {
-  margin: 0 14px 14px;
-  padding: 10px;
+  margin: 0 10px 10px;
+  padding: 9px;
 }
 
 .chat-local-context {
