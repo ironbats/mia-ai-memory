@@ -52,7 +52,7 @@ start_runtime() {
   origins="${AI_MEMORY_WORKSPACE_ORIGINS:-$(read_env AI_MEMORY_WORKSPACE_ORIGINS)}"
   host="${host:-127.0.0.1}"
   port="${port:-8791}"
-  origins="${origins:-http://localhost:5173,http://127.0.0.1:5173}"
+  origins="${origins:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174}"
   nohup env \
     AI_MEMORY_WORKSPACE_RUNTIME_HOST="$host" \
     AI_MEMORY_WORKSPACE_RUNTIME_PORT="$port" \

@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_HOST="${FRONTEND_HOST:-0.0.0.0}"
-FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+FRONTEND_PORT="${FRONTEND_PORT:-5174}"
 COGNITIVE_API_URL="${COGNITIVE_API_URL:-http://127.0.0.1:8787}"
 
 fail() {
@@ -40,4 +40,4 @@ export COGNITIVE_API_URL
 printf 'Frontend: http://127.0.0.1:%s\n' "$FRONTEND_PORT"
 printf 'Backend configurado: %s\n' "$COGNITIVE_API_URL"
 
-exec npm run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT"
+exec npm run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" --strictPort

@@ -7,10 +7,13 @@ import PortableProjectImportDialog from "./PortableProjectImportDialog.jsx"
 import ResizeHandle from "./layout/ResizeHandle.jsx"
 import ProjectSearch from "./ide/ProjectSearch.jsx"
 import IdeViewOptions from "./ide/IdeViewOptions.jsx"
+import IdeActivityBar from "./ide/IdeActivityBar.jsx"
 import useStoredPreference from "../hooks/useStoredPreference.js"
 import useDialogFocus from "../hooks/useDialogFocus.js"
 import useElementSize from "../hooks/useElementSize.js"
 import { analyzeDocument } from "../lib/ideLanguageService.js"
+import { buildNavigationRequest, resolveNavigation } from "../lib/ideNavigation.js"
+import { canFormatLanguage, formatDocument } from "../lib/ideFormatter.js"
 import { confirmAction, promptValue } from "../lib/dialogService.js"
 
 const fileBadge = path => {
@@ -145,7 +148,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const [commandOpen, setCommandOpen] = useState(false)
   const [commandQuery, setCommandQuery] = useState("")
   const [commandIndex, setCommandIndex] = useState(0)
-  const [cursor, setCursor] = useState({ line: 1, column: 1 })
+  const [cursor, setCursor] = useState({ line: 1, column: 1, offset: 0 })
   const [dialog, setDialog] = useState(null)
   const [workbenchPanel, setWorkbenchPanel] = useState("")
   const [portableImportOpen, setPortableImportOpen] = useState(false)
@@ -157,10 +160,15 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const [explorerHidden, setExplorerHidden] = useStoredPreference("ai-memory.ide.explorerHidden", false)
   const [sidebarMode, setSidebarMode] = useState("files")
   const [editorRequest, setEditorRequest] = useState(null)
+  const [navigationPicker, setNavigationPicker] = useState(null)
+  const [navigationBusy, setNavigationBusy] = useState("")
   const rootRef = useRef(null)
   const bodyRef = useRef(null)
   const editorColumnRef = useRef(null)
   const recentFilesRef = useRef(new Map())
+  const closedFilesRef = useRef(new Map())
+  const navigationAbortRef = useRef(null)
+  const navigationHistoryRef = useRef({ back: [], forward: [] })
   const bodySize = useElementSize(bodyRef, workspace.isReady && visible)
   const editorSize = useElementSize(editorColumnRef, workspace.isReady && visible)
   const narrowExplorer = bodySize.width > 0 && bodySize.width < 580
@@ -175,11 +183,14 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const commandInputRef = useRef(null)
   const quickDialogRef = useRef(null)
   const commandDialogRef = useRef(null)
+  const navigationDialogRef = useRef(null)
   useDialogFocus(quickDialogRef, quickOpen && visible)
   useDialogFocus(commandDialogRef, commandOpen && visible)
+  useDialogFocus(navigationDialogRef, Boolean(navigationPicker) && visible)
   const active = workspace.activeTab
   const lines = useMemo(() => active ? Math.max(1, active.content.split("\n").length) : 0, [active?.content])
   const changeMap = useMemo(() => new Map((workspace.sessionChanges || []).map(item => [item.path, item])), [workspace.sessionChanges])
+  const changeCount = workspace.terminalRuntimeAvailable ? workspace.gitWorkingChanges?.length || 0 : workspace.sessionChanges?.length || 0
   const searchResults = useMemo(() => {
     const normalized = query.trim().toLowerCase()
     if (!normalized) return []
@@ -209,6 +220,15 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const openPanel = panel => setWorkbenchPanel(current => current === panel ? current : panel)
   const closePanel = () => setWorkbenchPanel("")
   const togglePanel = () => setWorkbenchPanel(current => current ? "" : "terminal")
+  const toggleActivityPanel = panel => setWorkbenchPanel(current => current === panel ? "" : panel)
+  const activateSidebar = mode => {
+    if (!explorerHidden && sidebarMode === mode) {
+      setExplorerHidden(true)
+      return
+    }
+    setSidebarMode(mode)
+    setExplorerHidden(false)
+  }
   const openSearch = () => { setExplorerHidden(false); setSidebarMode("search") }
   const requestFind = (replace = false) => { if (active) setEditorRequest({ replace, nonce: Date.now() }) }
   const requestGoToLine = () => { if (active) setDialog({ type: "go-line", title: "Ir para linha", description: `Informe linha ou linha:coluna (1–${lines}).`, confirmLabel: "Ir", value: String(cursor.line) }) }
@@ -229,10 +249,121 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       setRevealLine({ ...result, nonce: Date.now(), session })
     } catch (error) { setLocalError(error.message || String(error)) }
   }
+  const currentNavigationLocation = () => active ? { path: active.path, line: cursor.line || 1, column: cursor.column || 1, length: 0 } : null
+  const navigateToLocation = async (location, recordHistory = true) => {
+    if (!location?.path) return
+    const current = currentNavigationLocation()
+    if (recordHistory && current && (current.path !== location.path || current.line !== location.line || current.column !== location.column)) {
+      const history = navigationHistoryRef.current
+      history.back = [...history.back, current].slice(-80)
+      history.forward = []
+    }
+    setLocalError("")
+    setNavigationPicker(null)
+    try {
+      await workspace.openFile(location.path)
+      setRevealLine({ path: location.path, line: location.line || 1, column: location.column || 1, length: location.length || 0, nonce: Date.now() })
+    } catch (error) {
+      setLocalError(error.message || String(error))
+    }
+  }
+  const navigateHistory = async direction => {
+    const history = navigationHistoryRef.current
+    const source = direction === "back" ? history.back : history.forward
+    if (!source.length) return
+    const target = source[source.length - 1]
+    const current = currentNavigationLocation()
+    if (direction === "back") {
+      history.back = source.slice(0, -1)
+      if (current) history.forward = [...history.forward, current].slice(-80)
+    } else {
+      history.forward = source.slice(0, -1)
+      if (current) history.back = [...history.back, current].slice(-80)
+    }
+    await navigateToLocation(target, false)
+  }
+  const runSymbolNavigation = async ({ offset = cursor.offset || 0, mode = "smart" } = {}) => {
+    if (!active) return
+    const request = buildNavigationRequest({ content: active.content, language: active.language, offset })
+    if (!request) {
+      setLocalError("NAVIGATION_SYMBOL_NOT_FOUND: posicione o cursor sobre um símbolo navegável.")
+      return
+    }
+    navigationAbortRef.current?.abort()
+    const controller = new AbortController()
+    navigationAbortRef.current = controller
+    setNavigationPicker(null)
+    setNavigationBusy(request.symbol)
+    setLocalError("")
+    try {
+      const results = await resolveNavigation({
+        request: { ...request, currentPath: active.path },
+        paths: workspace.filePaths,
+        drafts: new Map(workspace.tabs.map(tab => [tab.path, tab.content])),
+        readPath: workspace.readPath,
+        mode,
+        signal: controller.signal
+      })
+      if (controller.signal.aborted) return
+      if (!results.length) {
+        setLocalError(`NAVIGATION_SYMBOL_NOT_FOUND: nenhuma definição ou implementação encontrada para ${request.symbol}.`)
+        return
+      }
+      if (results.length === 1) {
+        await navigateToLocation(results[0])
+        return
+      }
+      setNavigationPicker({ symbol: request.symbol, mode, results })
+    } catch (error) {
+      if (error?.name !== "AbortError") setLocalError(error.message || String(error))
+    } finally {
+      if (navigationAbortRef.current === controller) {
+        navigationAbortRef.current = null
+        setNavigationBusy("")
+      }
+    }
+  }
+  const formatActiveDocument = () => {
+    if (!active) return
+    if (!canFormatLanguage(active.language)) {
+      setLocalError(`FORMATTER_UNSUPPORTED: formatação estruturada ainda não está disponível para ${active.language}.`)
+      return
+    }
+    const result = formatDocument({ content: active.content, language: active.language })
+    setLocalError("")
+    if (!result.changed) return
+    workspace.updateContent(active.path, result.content)
+    setRevealLine({ path: active.path, line: cursor.line || 1, column: cursor.column || 1, nonce: Date.now() })
+  }
   const switchTab = direction => {
+    if (!workspace.tabs.length) return
     const index = workspace.tabs.findIndex(tab => tab.path === workspace.activePath)
     const next = workspace.tabs[(index + direction + workspace.tabs.length) % workspace.tabs.length]
     if (next) workspace.setActivePath(next.path)
+  }
+  const rememberClosedEditor = tab => {
+    if (!tab?.path || !workspace.activeProjectId) return
+    const previous = closedFilesRef.current.get(workspace.activeProjectId) || []
+    closedFilesRef.current.set(workspace.activeProjectId, [tab.path, ...previous.filter(path => path !== tab.path)].slice(0, 30))
+  }
+  const closeEditor = tab => {
+    if (!tab) return
+    rememberClosedEditor(tab)
+    workspace.closeTab(tab.path)
+  }
+  const reopenClosedEditor = async () => {
+    const projectId = workspace.activeProjectId
+    const previous = [...(closedFilesRef.current.get(projectId) || [])]
+    while (previous.length) {
+      const path = previous.shift()
+      closedFilesRef.current.set(projectId, previous)
+      if (workspace.tabs.some(tab => tab.path === path)) continue
+      try {
+        await workspace.openFile(path)
+        return
+      } catch {
+      }
+    }
   }
   const changeIdeZoom = direction => {
     setIdeZoom(current => {
@@ -338,8 +469,8 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       title: workspace.projects?.length ? "Adicionar outro projeto à IDE?" : "Adicionar projeto local à IDE?",
       description: workspace.isReady
         ? `O projeto ${workspace.rootName} continuará disponível. Depois de autorizar outra pasta, você poderá alternar entre os projetos pelo seletor da IDE sem perder abas ou alterações não salvas da sessão.`
-        : "A IDE precisa de leitura e escrita para salvar arquivos e aplicar alterações do agente. Depois desta confirmação, o navegador exibirá a própria permissão de segurança da pasta.",
-      detail: "A pasta não é enviada integralmente ao servidor. O registro dos projetos fica no navegador e a permissão final de arquivos continua sob controle do próprio navegador.",
+        : "O Workspace Runtime local não está acessível. A IDE pode continuar pelo acesso seguro do navegador, com leitura e escrita direta na pasta selecionada.",
+      detail: "Chrome e Edge controlam a autorização final da pasta com uma caixa nativa de segurança que não pode ser estilizada pela aplicação. Inicie o Workspace Runtime para usar HOST RW, Git e terminal reais sem depender desse fluxo de autorização direta.",
       confirmLabel: "Selecionar pasta do projeto"
     })
     if (!confirmed) return
@@ -458,7 +589,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
 
   const requestCloseTab = tab => {
     if (!tab?.dirty) {
-      workspace.closeTab(tab.path)
+      closeEditor(tab)
       return
     }
     setDialog({
@@ -498,7 +629,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       return
     }
     if (dialog.type === "close-tab") {
-      workspace.closeTab(dialog.path)
+      closeEditor(workspace.tabs.find(tab => tab.path === dialog.path))
       setDialog(null)
       return
     }
@@ -516,6 +647,8 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const commandActions = [
     { id: "quick-open", label: "Files: Quick Open", detail: "Abrir arquivo por nome ou caminho", shortcut: "Ctrl+P", run: openQuick },
     { id: "new-file", label: "File: New File", detail: "Criar arquivo no projeto atual", shortcut: "", run: requestCreateFile },
+    { id: "close-editor", label: "File: Close Editor", detail: active?.name || "Nenhum editor ativo", shortcut: "Ctrl+W", run: () => requestCloseTab(active) },
+    { id: "reopen-editor", label: "File: Reopen Closed Editor", detail: "Reabrir o ultimo arquivo fechado neste projeto", shortcut: "Ctrl+Shift+T", run: reopenClosedEditor },
     { id: "save-all", label: "File: Save All", detail: `${workspace.dirtyCount} arquivo(s) pendente(s)`, shortcut: "Ctrl+Shift+S", run: () => workspace.saveAll().catch(error => setLocalError(error.message || String(error))) },
     { id: "refresh", label: "Workspace: Refresh", detail: "Reindexar árvore, Git e arquivos", shortcut: "", run: () => workspace.refresh().catch(error => setLocalError(error.message || String(error))) },
     { id: "add-project", label: "Workspace: Add Project", detail: `${workspace.projects?.length || 0} projeto(s) disponível(is) na IDE`, shortcut: "", run: chooseDirectory },
@@ -526,9 +659,15 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
     { id: "zoom-in", label: "View: Increase IDE Zoom", detail: `Aumentar legibilidade da IDE · atual ${ideZoom}%`, shortcut: "Ctrl+Alt+=", run: () => changeIdeZoom(1) },
     { id: "zoom-out", label: "View: Decrease IDE Zoom", detail: `Reduzir escala visual da IDE · atual ${ideZoom}%`, shortcut: "Ctrl+Alt+-", run: () => changeIdeZoom(-1) },
     { id: "zoom-reset", label: "View: Reset IDE Zoom", detail: `Restaurar escala visual para ${IDE_DEFAULT_ZOOM}%`, shortcut: "Ctrl+Alt+0", run: resetIdeZoom },
+    { id: "explorer-view", label: "View: Explorer", detail: "Mostrar arquivos do projeto", shortcut: "Ctrl+Shift+E", run: () => { setSidebarMode("files"); setExplorerHidden(false) } },
     { id: "project-search", label: "Buscar: Conteúdo no projeto", detail: "Buscar também nas alterações não salvas", shortcut: "Ctrl+Shift+F", run: openSearch },
     { id: "find", label: "Buscar: No arquivo", detail: "Localizar texto no editor", shortcut: "Ctrl+F", run: () => requestFind() },
     { id: "replace", label: "Buscar: Substituir no arquivo", detail: "Revisar no editor antes de salvar", shortcut: "Ctrl+H", run: () => requestFind(true) },
+    { id: "format-document", label: "Formatar: Documento", detail: active ? `Formatar ${active.name} como ${active.language}` : "Selecione um arquivo", shortcut: "Shift+Alt+F", run: formatActiveDocument },
+    { id: "go-definition", label: "Navegar: Ir para definição", detail: "Resolver o símbolo sob o cursor", shortcut: "F12", run: () => runSymbolNavigation({ mode: "definition" }) },
+    { id: "go-implementation", label: "Navegar: Ir para implementação", detail: "Encontrar implementações do símbolo sob o cursor", shortcut: "Ctrl+F12", run: () => runSymbolNavigation({ mode: "implementation" }) },
+    { id: "navigate-back", label: "Navegar: Voltar", detail: "Voltar para a posição anterior", shortcut: "Alt+Left", run: () => navigateHistory("back") },
+    { id: "navigate-forward", label: "Navegar: Avançar", detail: "Avançar no histórico de navegação", shortcut: "Alt+Right", run: () => navigateHistory("forward") },
     { id: "go-line", label: "Navegar: Ir para linha", detail: "Linha e coluna no arquivo atual", shortcut: "Ctrl+G", run: requestGoToLine },
     { id: "reveal", label: "Navegar: Revelar arquivo no explorador", detail: active?.path || "Selecione um arquivo", run: revealInExplorer },
     { id: "explorer", label: "Visualizar: Alternar explorador", detail: "Mais espaço para o código", shortcut: "Ctrl+B", run: () => setExplorerHidden(value => !value) },
@@ -536,7 +675,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
     { id: "reset-layout", label: "Visualizar: Restaurar layout", detail: "Divisão 50/50, explorador e escala padrão", run: resetView },
     { id: "next-tab", label: "Abas: Próxima", detail: "Alternar arquivo aberto", shortcut: "Alt+PageDown", run: () => switchTab(1) },
     { id: "previous-tab", label: "Abas: Anterior", detail: "Alternar arquivo aberto", shortcut: "Alt+PageUp", run: () => switchTab(-1) },
-    { id: "close-saved", label: "Abas: Fechar arquivos salvos", detail: "Manter todas as alterações não salvas abertas", run: () => workspace.tabs.filter(tab => !tab.dirty).forEach(tab => workspace.closeTab(tab.path)) }
+    { id: "close-saved", label: "Abas: Fechar arquivos salvos", detail: "Manter todas as alterações não salvas abertas", run: () => workspace.tabs.filter(tab => !tab.dirty).forEach(closeEditor) }
   ]
 
   const commandResults = commandActions
@@ -558,12 +697,17 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
     setQuery("")
     setQuickOpen(false)
     setCommandOpen(false)
-    setCursor({ line: 1, column: 1 })
+    setCursor({ line: 1, column: 1, offset: 0 })
     setRevealLine(null)
     setWorkbenchPanel("")
     setDialog(null)
     setEditorRequest(null)
     setSidebarMode("files")
+    setNavigationPicker(null)
+    setNavigationBusy("")
+    navigationAbortRef.current?.abort()
+    navigationAbortRef.current = null
+    navigationHistoryRef.current = { back: [], forward: [] }
   }, [workspace.workspaceSession])
 
   useEffect(() => {
@@ -576,8 +720,17 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       if (!visible || !workspace.isReady || event.defaultPrevented || event.isComposing) return
       if (event.target?.closest('[role="dialog"], .platform-dialog-backdrop, .ide-dialog-backdrop')) return
       const modifier = event.ctrlKey || event.metaKey
-      const insideEditor = rootRef.current?.contains(event.target)
-      if (modifier && !event.altKey && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); openSearch(); return }
+      const insideEditor = rootRef.current?.contains(event.target) || rootRef.current?.contains(document.activeElement)
+      if (insideEditor && event.key === "F1") { event.preventDefault(); openCommandPalette(); return }
+      if (insideEditor && event.key === "F12") { event.preventDefault(); runSymbolNavigation({ mode: modifier ? "implementation" : "definition" }); return }
+      if (insideEditor && event.altKey && event.shiftKey && !modifier && event.key.toLowerCase() === "f") { event.preventDefault(); formatActiveDocument(); return }
+      if (insideEditor && event.altKey && !event.shiftKey && !modifier && event.key === "ArrowLeft") { event.preventDefault(); navigateHistory("back"); return }
+      if (insideEditor && event.altKey && !event.shiftKey && !modifier && event.key === "ArrowRight") { event.preventDefault(); navigateHistory("forward"); return }
+      if (modifier && !event.altKey && event.shiftKey && event.key.toLowerCase() === "e" && insideEditor) { event.preventDefault(); setSidebarMode("files"); setExplorerHidden(false); return }
+      if (modifier && !event.altKey && event.shiftKey && event.key.toLowerCase() === "f" && insideEditor) { event.preventDefault(); openSearch(); return }
+      if (modifier && !event.altKey && event.shiftKey && event.key.toLowerCase() === "t" && insideEditor) { event.preventDefault(); reopenClosedEditor(); return }
+      if (modifier && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "w" && insideEditor) { event.preventDefault(); requestCloseTab(active); return }
+      if (modifier && !event.altKey && event.key === "Tab" && insideEditor) { event.preventDefault(); switchTab(event.shiftKey ? -1 : 1); return }
       if (modifier && !event.altKey && !event.shiftKey && insideEditor) {
         const key = event.key.toLowerCase()
         if (["f", "h", "g", "b", "j"].includes(key)) {
@@ -590,53 +743,53 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
         }
       }
       if (event.altKey && !modifier && insideEditor && ["PageDown", "PageUp"].includes(event.key)) { event.preventDefault(); switchTab(event.key === "PageDown" ? 1 : -1); return }
-      if (modifier && !event.altKey && event.key.toLowerCase() === "s") {
+      if (modifier && !event.altKey && event.key.toLowerCase() === "s" && insideEditor) {
         event.preventDefault()
-        const save = event.shiftKey || !insideEditor || !active ? workspace.saveAll() : workspace.saveFile(active.path)
+        const save = event.shiftKey || !active ? workspace.saveAll() : workspace.saveFile(active.path)
         save.catch(error => setLocalError(error.message || String(error)))
         return
       }
-      if ((event.ctrlKey || event.metaKey) && event.altKey && (event.key === "=" || event.key === "+")) {
+      if ((event.ctrlKey || event.metaKey) && event.altKey && (event.key === "=" || event.key === "+") && insideEditor) {
         event.preventDefault()
         changeIdeZoom(1)
         return
       }
-      if ((event.ctrlKey || event.metaKey) && event.altKey && event.key === "-") {
+      if ((event.ctrlKey || event.metaKey) && event.altKey && event.key === "-" && insideEditor) {
         event.preventDefault()
         changeIdeZoom(-1)
         return
       }
-      if ((event.ctrlKey || event.metaKey) && event.altKey && event.key === "0") {
+      if ((event.ctrlKey || event.metaKey) && event.altKey && event.key === "0" && insideEditor) {
         event.preventDefault()
         resetIdeZoom()
         return
       }
-      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "p") {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "p" && insideEditor) {
         event.preventDefault()
         openCommandPalette()
         return
       }
-      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "p") {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "p" && insideEditor) {
         event.preventDefault()
         openQuick()
         return
       }
-      if ((event.ctrlKey || event.metaKey) && event.key === "`") {
+      if ((event.ctrlKey || event.metaKey) && event.key === "`" && insideEditor) {
         event.preventDefault()
         openPanel("terminal")
         return
       }
-      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "g") {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "g" && insideEditor) {
         event.preventDefault()
         openPanel("changes")
         return
       }
-      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "o") {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "o" && insideEditor) {
         event.preventDefault()
         openPanel("outline")
         return
       }
-      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "m") {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "m" && insideEditor) {
         event.preventDefault()
         openPanel("problems")
         return
@@ -651,7 +804,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   })
 
   useEffect(() => {
-    setCursor({ line: 1, column: 1 })
+    setCursor({ line: 1, column: 1, offset: 0 })
     setRevealLine(current => current?.path === active?.path ? current : null)
     setEditorRequest(null)
     setAnalysis(EMPTY_ANALYSIS)
@@ -836,16 +989,16 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
       {!workspace.isReady ? (
         <div className="ide-empty-state">
           <span className="ide-empty-mark">&lt;/&gt;</span>
-          <span className="eyebrow">{workspace.directAccessSupported ? "Local workspace" : "Browser workspace"}</span>
+          <span className="eyebrow">{workspace.runtimeAvailable ? "Host workspace" : workspace.directAccessSupported ? "Local workspace" : "Browser workspace"}</span>
           <h2>Código, memória e agente.<br /><em>No mesmo fluxo.</em></h2>
-          <p>{workspace.projects?.length ? "Selecione no topo um projeto já adicionado ou conecte outra pasta. Cada projeto mantém suas próprias abas, contexto, alterações da sessão e estado de Git enquanto você alterna entre eles." : workspace.directAccessSupported ? "Selecione a raiz do primeiro projeto para editar arquivos diretamente na pasta local. Depois você poderá adicionar quantos projetos precisar e alternar entre eles sem substituir o workspace atual." : "Importe o primeiro projeto arrastando a pasta para a IDE ou selecionando um ZIP. O AI Memory criará um workspace privado e editável neste navegador sem usar a confirmação nativa de upload de diretório."}</p>
-          <button className="primary-button" onClick={chooseDirectory} disabled={!workspace.projectRegistryReady}>{workspace.projectRegistryReady ? workspace.projects?.length ? "Adicionar outro projeto" : workspace.directAccessSupported ? "Adicionar primeiro projeto" : "Importar primeiro projeto" : "Carregando projetos…"}</button>
-          <small>{workspace.projectRegistryPersistent ? workspace.directAccessSupported ? ".git, dependências, binários, chaves e arquivos .env permanecem fora do contexto enviado ao agente. A lista de projetos fica registrada neste navegador." : "Modo Browser Workspace ativo: arraste uma pasta ou importe ZIP. Dependências, artefatos e segredos são ignorados; a cópia editável fica registrada apenas neste navegador." : "A sessão multi-projeto está ativa, mas o navegador não permitiu persistir a lista localmente."}</small>
+          <p>{workspace.projects?.length ? "Selecione no topo um projeto já adicionado ou conecte outra pasta. Cada projeto mantém suas próprias abas, contexto, alterações da sessão e estado de Git enquanto você alterna entre eles." : workspace.runtimeAvailable ? "Conecte a raiz do primeiro projeto pelo Workspace Runtime para editar o filesystem físico com Git e terminal reais. Depois você poderá alternar entre vários projetos sem substituir o workspace atual." : workspace.directAccessSupported ? "Selecione a raiz do primeiro projeto para editar arquivos diretamente na pasta local. Depois você poderá adicionar quantos projetos precisar e alternar entre eles sem substituir o workspace atual." : "Importe o primeiro projeto arrastando a pasta para a IDE ou selecionando um ZIP. O AI Memory criará um workspace privado e editável neste navegador sem usar a confirmação nativa de upload de diretório."}</p>
+          <button className="primary-button" onClick={chooseDirectory} disabled={!workspace.projectRegistryReady}>{workspace.projectRegistryReady ? workspace.projects?.length ? "Adicionar outro projeto" : workspace.runtimeAvailable ? "Conectar primeiro projeto" : workspace.directAccessSupported ? "Adicionar primeiro projeto" : "Importar primeiro projeto" : "Carregando projetos…"}</button>
+          <small>{workspace.projectRegistryPersistent ? workspace.runtimeAvailable ? "Workspace Runtime conectado em localhost: alterações, Git, terminal e comandos operam diretamente no projeto físico com as permissões do usuário local." : workspace.directAccessSupported ? ".git, dependências, binários, chaves e arquivos .env permanecem fora do contexto enviado ao agente. A lista de projetos fica registrada neste navegador." : "Modo Browser Workspace ativo: arraste uma pasta ou importe ZIP. Dependências, artefatos e segredos são ignorados; a cópia editável fica registrada apenas neste navegador." : "A sessão multi-projeto está ativa, mas o navegador não permitiu persistir a lista localmente."}</small>
         </div>
       ) : (
         <div ref={bodyRef} className={`ide-body${!explorerVisible ? " explorer-hidden" : ""}${narrowExplorer ? " narrow-explorer" : ""}`}>
+          <IdeActivityBar sidebarMode={sidebarMode} explorerVisible={explorerVisible} workbenchPanel={workbenchPanel} changeCount={changeCount} problemCount={analysis.diagnostics.length} symbolCount={analysis.symbols.length} terminalRuntimeAvailable={workspace.terminalRuntimeAvailable} onExplorer={() => activateSidebar("files")} onSearch={() => activateSidebar("search")} onPanel={toggleActivityPanel} />
           {explorerVisible ? <aside id="ide-explorer-pane" className="ide-explorer">
-            <div className="ide-sidebar-tabs"><button aria-pressed={sidebarMode === "files"} onClick={() => setSidebarMode("files")}>Arquivos</button><button aria-pressed={sidebarMode === "search"} onClick={openSearch} title="Buscar no projeto · Ctrl+Shift+F">Buscar</button><button onClick={() => setExplorerHidden(true)} aria-label="Recolher explorador">‹</button></div>
             {sidebarMode === "search" ? <ProjectSearch key={workspace.workspaceSession} workspace={workspace} onOpen={openSearchResult} /> : <>
 
             <div className="ide-explorer-head"><div><span>Explorer</span><strong>{workspace.rootName}</strong>{workspace.gitRepository ? <button onClick={() => openPanel("changes")}><i>⑂</i>{workspace.gitBranch || workspace.gitHeadShort || "Git"}</button> : null}</div><button onClick={requestCreateFile} title="Novo arquivo" disabled={workspace.projectSwitching || workspace.workspaceBusy}>+</button></div>
@@ -882,23 +1035,21 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
               <div className={`ide-breadcrumbs${active ? "" : " workspace-tools"}`}>
                 {active ? active.path.split("/").map((part, index, values) => <React.Fragment key={`${part}:${index}`}><button onClick={revealInExplorer} title="Revelar no explorador">{part}</button>{index < values.length - 1 ? <i>›</i> : null}</React.Fragment>) : <><span>Workspace</span><i>›</i><span>Ferramentas de desenvolvimento</span></>}
               </div>
-              <div className="ide-editor-actions ide-workbench-actions" aria-label="Ferramentas de desenvolvimento">
-                <button onClick={() => requestFind()} disabled={!active} title="Buscar no arquivo · Ctrl+F">⌕</button>
-                <button className={workbenchPanel === "problems" ? "active" : ""} onClick={() => openPanel("problems")} title="Problems · Ctrl/Cmd+Shift+M"><span>✓</span><strong>Problems</strong><b>{analysis.diagnostics.length}</b></button>
-                <button className={workbenchPanel === "outline" ? "active" : ""} onClick={() => openPanel("outline")} title="Outline / AST · Ctrl/Cmd+Shift+O"><span>◇</span><strong>AST</strong><b>{analysis.symbols.length}</b></button>
-                <button className={workbenchPanel === "changes" ? "active" : ""} onClick={() => openPanel("changes")} title="Git / Source Control · Ctrl/Cmd+Shift+G"><span>⑂</span><strong>Git</strong><b>{workspace.terminalRuntimeAvailable ? workspace.gitWorkingChanges?.length || 0 : workspace.sessionChanges?.length || 0}</b></button>
-                <button className={workbenchPanel === "terminal" ? "active" : ""} onClick={() => openPanel("terminal")} title="Workspace Terminal · Ctrl/Cmd+`"><span>›_</span><strong>Terminal</strong></button>
-                {active ? <button className={workspace.contextPaths.includes(active.path) ? "active" : ""} onClick={() => workspace.toggleContext(active.path)}>{workspace.contextPaths.includes(active.path) ? "● Contexto" : "○ Fixar"}</button> : null}
-                {active ? <button onClick={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} disabled={!active.dirty || workspace.projectSwitching || workspace.workspaceBusy}>Salvar</button> : null}
+              <div className="ide-editor-actions ide-workbench-actions" aria-label="Acoes do editor">
+                <button onClick={() => requestFind()} disabled={!active} title="Buscar no arquivo · Ctrl+F"><span>F</span><strong>Buscar</strong></button>
+                {active ? <button className={workspace.contextPaths.includes(active.path) ? "active" : ""} onClick={() => workspace.toggleContext(active.path)} title="Fixar arquivo no contexto do agente"><span>C</span><strong>{workspace.contextPaths.includes(active.path) ? "Contexto" : "Fixar"}</strong></button> : null}
+                {active ? <button onClick={formatActiveDocument} disabled={!canFormatLanguage(active.language)} title="Formatar documento · Shift+Alt+F"><span>⇥</span><strong>Formatar</strong></button> : null}
+                {active ? <button onClick={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} disabled={!active.dirty || workspace.projectSwitching || workspace.workspaceBusy} title="Salvar arquivo · Ctrl/Cmd+S"><span>S</span><strong>Salvar</strong></button> : null}
               </div>
             </div>
-            {active ? <SyntaxEditor key={`${workspace.workspaceSession}:${active.path}`} searchRequest={editorRequest} value={active.content} language={active.language} path={active.path} onChange={content => workspace.updateContent(active.path, content)} onSave={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} onCursorChange={setCursor} revealLine={revealLine} fontSize={14 * ideZoom / 100} /> : <div className="ide-editor-empty"><span>&lt;/&gt;</span><strong>Escolha um arquivo para começar</strong><p>Git, Terminal, AST e Problems permanecem acessíveis acima mesmo sem um arquivo aberto.</p></div>}
+            {active ? <SyntaxEditor key={`${workspace.workspaceSession}:${active.path}`} searchRequest={editorRequest} value={active.content} language={active.language} path={active.path} onChange={content => workspace.updateContent(active.path, content)} onSave={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} onCursorChange={setCursor} onNavigate={runSymbolNavigation} revealLine={revealLine} fontSize={14 * ideZoom / 100} /> : <div className="ide-editor-empty"><span>&lt;/&gt;</span><strong>Escolha um arquivo para começar</strong><p>Git, Terminal, Outline e Problems permanecem acessiveis pela barra de atividades mesmo sem um arquivo aberto.</p></div>}
             {workbenchPanel ? <IdeWorkbenchPanel activePanel={workbenchPanel} onPanelChange={setWorkbenchPanel} onClose={closePanel} workspace={workspace} analysis={analysis} onRevealLine={revealActiveLine} resizeHandle={<ResizeHandle className="ide-workbench-divider" orientation="horizontal" reverse label="Altura do painel inferior" value={workbenchHeight} min={110} max={workbenchMax} onChange={setWorkbenchHeight} onReset={() => setWorkbenchHeight(260)} />} /> : null}
             <footer className="ide-statusbar">
               <button className="status-git" onClick={() => openPanel("changes")} title={workspace.gitHead ? `HEAD ${workspace.gitHead}` : "Git"}>{workspace.gitRepository ? `⑂ ${workspace.gitBranch || workspace.gitHeadShort || "Git"}` : "sem Git"}</button>
               {active ? <span className={active.dirty ? "status-dirty" : "status-saved"}>{active.dirty ? "● Modificado" : "✓ Salvo"}</span> : <span className="status-saved">✓ Workspace ativo</span>}
+              {navigationBusy ? <span className="status-navigation">⌕ {navigationBusy}</span> : null}
               <button onClick={() => openPanel("problems")} className={analysis.errorCount ? "status-problem" : ""}>{analysis.errorCount ? `× ${analysis.errorCount}` : "✓ 0"}</button>
-              {active ? <><button onClick={requestGoToLine} title="Ir para linha · Ctrl+G">Ln {cursor.line}, Col {cursor.column}</button><span>{active.language}</span><span>{lines} linhas</span><strong>Ctrl+Space sugestões</strong></> : <><span>{workspace.filePaths.length} arquivos</span><span>{workspace.contextPaths.length} contexto</span><span>{workspace.terminalRuntimeAvailable ? workspace.gitWorkingChanges?.length || 0 : workspace.sessionChanges?.length || 0} changes</span><strong>Ctrl+` Terminal · Ctrl+Shift+G Git</strong></>}
+              {active ? <><button onClick={requestGoToLine} title="Ir para linha · Ctrl+G">Ln {cursor.line}, Col {cursor.column}</button><span>{active.language}</span><span>{lines} linhas</span><strong>Ctrl+Click navegar · F12 definição · Shift+Alt+F formatar</strong></> : <><span>{workspace.filePaths.length} arquivos</span><span>{workspace.contextPaths.length} contexto</span><span>{workspace.terminalRuntimeAvailable ? workspace.gitWorkingChanges?.length || 0 : workspace.sessionChanges?.length || 0} changes</span><strong>Ctrl+` Terminal · Ctrl+Shift+G Git</strong></>}
             </footer>
           </div>
         </div>
@@ -929,6 +1080,18 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
               {commandResults.map((item, index) => <button key={item.action.id} className={index === commandIndex ? "active" : ""} onMouseEnter={() => setCommandIndex(index)} onClick={() => { setCommandOpen(false); item.action.run() }}><span>◇</span><div><strong>{item.action.label}</strong><small>{item.action.detail}</small></div>{item.action.shortcut ? <kbd>{item.action.shortcut}</kbd> : null}</button>)}
             </div>
             <footer><span>Command Palette</span><strong>Ctrl/Cmd+Shift+P</strong></footer>
+          </div>
+        </div>
+      ) : null}
+
+      {navigationPicker ? (
+        <div className="ide-quick-open-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setNavigationPicker(null) }}>
+          <div ref={navigationDialogRef} className="ide-command-palette ide-navigation-picker" onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); setNavigationPicker(null) } }} role="dialog" aria-modal="true" aria-label={`Destinos de ${navigationPicker.symbol}`}>
+            <div className="ide-navigation-picker-head"><div><strong>{navigationPicker.symbol}</strong><small>{navigationPicker.mode === "implementation" ? "Implementações" : navigationPicker.mode === "definition" ? "Definições" : "Destinos inteligentes"} · {navigationPicker.results.length} resultado(s)</small></div><button type="button" onClick={() => setNavigationPicker(null)} aria-label="Fechar destinos">×</button></div>
+            <div className="ide-command-results">
+              {navigationPicker.results.map((item, index) => <button key={`${item.path}:${item.line}:${item.column}:${index}`} onClick={() => navigateToLocation(item)}><span>↪</span><div><strong>{item.path.split("/").pop()} · linha {item.line}</strong><small>{item.kind} · {item.path}</small><small className="ide-navigation-detail">{item.detail}</small></div><kbd>Enter</kbd></button>)}
+            </div>
+            <footer><span>Ctrl+Click usa navegação inteligente</span><span>F12 definição</span><strong>Ctrl+F12 implementação</strong></footer>
           </div>
         </div>
       ) : null}

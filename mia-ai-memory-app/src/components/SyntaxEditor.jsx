@@ -253,7 +253,7 @@ const tokenize = (text, language) => {
   return codeTokens(text, language)
 }
 
-export default function SyntaxEditor({ value, language, path, onChange, onSave, onCursorChange, revealLine = null, fontSize = 14, searchRequest = null }) {
+export default function SyntaxEditor({ value, language, path, onChange, onSave, onCursorChange, onNavigate, revealLine = null, fontSize = 14, searchRequest = null }) {
   const [findRequest, setFindRequest] = useState(null)
   const highlightRef = useRef(null)
   const lineRef = useRef(null)
@@ -262,6 +262,7 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
   const [completionItems, setCompletionItems] = useState([])
   const [completionIndex, setCompletionIndex] = useState(0)
   const [completionAnchor, setCompletionAnchor] = useState({ top: 22, left: 10 })
+  const [navigationModifier, setNavigationModifier] = useState(false)
   const tokens = useMemo(() => tokenize(String(value || ""), language), [language, value])
   const lineNumbers = useMemo(() => Array.from({ length: Math.max(1, String(value || "").split("\n").length) }, (_, index) => index + 1).join("\n"), [value])
 
@@ -286,7 +287,7 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
     const line = before.split("\n").length
     const lastBreak = before.lastIndexOf("\n")
     const column = textarea.selectionStart - lastBreak
-    onCursorChange?.({ line, column })
+    onCursorChange?.({ line, column, offset: textarea.selectionStart })
   }
 
   const openCompletions = (textarea, content = value) => {
@@ -358,7 +359,6 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
     const previousFocus = document.activeElement
     textarea.focus()
     textarea.setSelectionRange(start, end)
-    // Native insertion preserves the textarea's undo history in Chrome/Edge.
     const inserted = document.execCommand("insertText", false, replacement)
     if (!inserted) onChange(`${value.slice(0, start)}${replacement}${value.slice(end)}`)
     window.requestAnimationFrame(() => {
@@ -380,6 +380,7 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
   }, [searchRequest?.nonce])
 
   const handleKeyDown = event => {
+    if (event.key === "Control" || event.key === "Meta") setNavigationModifier(true)
     if (event.isComposing || event.nativeEvent?.isComposing) return
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && ["f", "h"].includes(event.key.toLowerCase())) {
       event.preventDefault()
@@ -431,6 +432,17 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
     }
   }
 
+  const handleClick = event => {
+    updateCursor(event)
+    setCompletionOpen(false)
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) onNavigate?.({ offset: event.currentTarget.selectionStart, mode: "smart" })
+  }
+
+  const handleKeyUp = event => {
+    if (event.key === "Control" || event.key === "Meta") setNavigationModifier(false)
+    updateCursor(event)
+  }
+
   useEffect(() => {
     if (!revealLine?.line || revealLine.path !== path) return
     const textarea = textareaRef.current
@@ -450,7 +462,7 @@ export default function SyntaxEditor({ value, language, path, onChange, onSave, 
       <pre ref={lineRef} className="ide-syntax-lines" aria-hidden="true">{lineNumbers}</pre>
       <div className="ide-syntax-editor">
         <pre ref={highlightRef} className="ide-syntax-highlight" aria-hidden="true">{tokens.map((token, index) => token.type === "plain" ? <React.Fragment key={index}>{token.value}</React.Fragment> : <span key={index} className={`syntax-${token.type}`}>{token.value}</span>)}</pre>
-        <textarea ref={textareaRef} value={value} onChange={handleChange} onKeyDown={handleKeyDown} onScroll={syncScroll} onClick={event => { updateCursor(event); setCompletionOpen(false) }} onKeyUp={updateCursor} onSelect={updateCursor} spellCheck="false" wrap="off" aria-label={`Editor ${path}`} />
+        <textarea ref={textareaRef} className={navigationModifier ? "navigation-modifier" : ""} value={value} onChange={handleChange} onKeyDown={handleKeyDown} onScroll={syncScroll} onClick={handleClick} onKeyUp={handleKeyUp} onBlur={() => setNavigationModifier(false)} onSelect={updateCursor} spellCheck="false" wrap="off" aria-label={`Editor ${path}`} />
         {completionOpen ? <div className="ide-completion-popup" style={completionAnchor}>
           <header><span>Local Intelligence</span><kbd>Ctrl+Space</kbd></header>
           {completionItems.map((item, index) => <button type="button" key={`${item.kind}:${item.label}`} className={index === completionIndex ? "active" : ""} onMouseDown={event => { event.preventDefault(); applyCompletion(item) }}><i>{item.kind === "keyword" ? "K" : "S"}</i><strong>{item.label}</strong><small>{item.kind}</small></button>)}

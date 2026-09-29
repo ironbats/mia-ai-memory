@@ -15,7 +15,7 @@ const MAX_TERMINAL_OUTPUT_BYTES = 4 * 1024 * 1024
 const MAX_TERMINAL_SESSIONS = 80
 const RUNTIME_DIR = path.join(os.homedir(), ".ai-memory")
 const REGISTRY_FILE = process.env.AI_MEMORY_WORKSPACE_RUNTIME_REGISTRY || path.join(RUNTIME_DIR, "workspace-runtime.json")
-const configuredOrigins = String(process.env.AI_MEMORY_WORKSPACE_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173")
+const configuredOrigins = String(process.env.AI_MEMORY_WORKSPACE_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174")
   .split(",")
   .map(value => value.trim())
   .filter(Boolean)
