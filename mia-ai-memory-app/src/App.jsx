@@ -60,7 +60,8 @@ export default function App() {
   const [actionError, setActionError] = useState("")
   const [memory, setMemory] = useState(null)
   const [memoryLoading, setMemoryLoading] = useState(false)
-  const [ideOpen, setIdeOpen] = useState(false)
+  const [ideOpen, setIdeOpen] = useState(true)
+  const [workspaceMaximized, setWorkspaceMaximized] = useState(false)
   const workspaceLayout = useWorkspaceLayout()
   const { layout: ideLayout, selectLayout: setIdeLayout } = workspaceLayout
   const localWorkspace = useLocalWorkspace()
@@ -246,8 +247,29 @@ export default function App() {
     setIdeOpen(true)
   }
 
+  const closeDeveloperWorkspace = () => {
+    setWorkspaceMaximized(false)
+    setIdeOpen(false)
+  }
+
+  const toggleWorkspaceMaximized = () => {
+    setIdeOpen(true)
+    setWorkspaceMaximized(value => !value)
+  }
+
+  useEffect(() => {
+    if (!workspaceMaximized) return undefined
+    const handleEscape = event => {
+      if (event.key !== "Escape" || event.defaultPrevented) return
+      if (event.target?.closest?.('[role="dialog"], .platform-dialog-backdrop, .ide-dialog-backdrop')) return
+      setWorkspaceMaximized(false)
+    }
+    window.addEventListener("keydown", handleEscape)
+    return () => window.removeEventListener("keydown", handleEscape)
+  }, [workspaceMaximized])
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${workspaceMaximized ? " workspace-maximized" : ""}`}>
       <header className="topbar">
         <div className="brand-block">
           <div className="brand-mark"><span /></div>
@@ -333,11 +355,11 @@ export default function App() {
         )}
         </div>
         <div id="developer-code-pane" className="code-ide-column" aria-label="AI Memory Developer Workspace">
-          <CodeWorkspace visible={ideOpen} workspace={localWorkspace} layout={ideLayout} onLayoutChange={setIdeLayout} onClose={() => setIdeOpen(false)} />
+          <CodeWorkspace visible={ideOpen} workspace={localWorkspace} layout={ideLayout} onLayoutChange={setIdeLayout} onClose={closeDeveloperWorkspace} maximized={workspaceMaximized} onToggleMaximize={toggleWorkspaceMaximized} />
         </div>
         {ideOpen ? <ResizeHandle className="workspace-main-resizer" label="Proporção entre IDE e chat" controls="developer-code-pane developer-chat-pane" containerRef={workspaceLayout.containerRef} unit="%" value={workspaceLayout.value} min={workspaceLayout.min} max={workspaceLayout.max} onChange={workspaceLayout.setValue} onReset={workspaceLayout.reset} /> : null}
         <aside id="developer-chat-pane" className="persistent-chat-column" aria-label="AI Memory Chat">
-          <ChatWorkspace scope={scope} onConfigure={() => setTab("integrations")} workspace={localWorkspace} ideOpen={ideOpen} ideLayout={ideLayout} onIDELayoutChange={setIdeLayout} onOpenIDE={openDeveloperWorkspace} onCloseIDE={() => setIdeOpen(false)} />
+          <ChatWorkspace scope={scope} onConfigure={() => setTab("integrations")} workspace={localWorkspace} ideOpen={ideOpen} ideLayout={ideLayout} onIDELayoutChange={setIdeLayout} onOpenIDE={openDeveloperWorkspace} onCloseIDE={closeDeveloperWorkspace} />
         </aside>
       </main>
       <MemoryDrawer memory={memory} loading={memoryLoading} onClose={() => setMemory(null)} />

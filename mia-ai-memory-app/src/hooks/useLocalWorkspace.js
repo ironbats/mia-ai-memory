@@ -7,6 +7,8 @@ const MAX_TREE_FILES = 5000
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const MAX_CONTEXT_FILES = 28
 const MAX_CONTEXT_BYTES = 1536 * 1024
+const AUTO_FILE_REFRESH_MS = 2200
+const AUTO_TREE_REFRESH_MS = 6000
 
 const ignoredDirectories = new Set([
   ".git", "node_modules", "dist", "build", "target", "vendor", ".next", ".nuxt", ".cache", "coverage", ".gradle", ".terraform", ".idea", "__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "venv"
@@ -16,7 +18,7 @@ const binaryExtensions = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "pdf", "zip", "gz", "tgz", "tar", "7z", "rar", "jar", "war", "class", "exe", "dll", "so", "dylib", "bin", "dat", "db", "sqlite", "sqlite3", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "mkv", "wav", "flac", "ogg", "pyc", "o", "a", "wasm", "lockb"
 ])
 
-const protectedNames = new Set([".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519"])
+const sensitiveNames = new Set([".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519"])
 
 const normalizePath = value => String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "")
 const basename = path => normalizePath(path).split("/").pop() || ""
@@ -26,16 +28,19 @@ const extension = path => {
   return index > 0 ? name.slice(index + 1).toLowerCase() : ""
 }
 
-const isProtectedPath = path => {
+const isInvalidWorkspacePath = path => {
   const normalized = normalizePath(path)
-  const segments = normalized.split("/")
   if (!normalized || normalized.startsWith("../") || normalized.includes("/../") || normalized.includes("\0")) return true
-  if (segments.some(segment => ignoredDirectories.has(segment))) return true
+  return normalized.split("/").some(segment => ignoredDirectories.has(segment))
+}
+
+const isSensitivePath = path => {
+  const normalized = normalizePath(path)
+  if (!normalized) return false
   const name = basename(normalized).toLowerCase()
-  if (protectedNames.has(name)) return true
+  if (sensitiveNames.has(name)) return true
   if (name.startsWith(".env.") && name !== ".env.example") return true
-  if (["pem", "key", "p12", "pfx", "jks", "keystore"].includes(extension(name))) return true
-  return false
+  return ["pem", "key", "p12", "pfx", "jks", "keystore"].includes(extension(name))
 }
 
 const hashText = async value => {
@@ -69,7 +74,7 @@ const languageFor = path => {
 
 const safeRelativePath = value => {
   const normalized = normalizePath(value)
-  if (!normalized || normalized.startsWith("../") || normalized.includes("/../") || normalized.startsWith("/") || isProtectedPath(normalized)) throw new Error(`Caminho não permitido: ${value}`)
+  if (!normalized || normalized.startsWith("../") || normalized.includes("/../") || normalized.startsWith("/") || isInvalidWorkspacePath(normalized)) throw new Error(`Caminho não permitido: ${value}`)
   return normalized
 }
 
@@ -186,6 +191,7 @@ export default function useLocalWorkspace() {
   const [workspaceBusy, setWorkspaceBusy] = useState(false)
   const [runtimeAvailable, setRuntimeAvailable] = useState(false)
   const [runtimeGitChanges, setRuntimeGitChanges] = useState([])
+  const [lastRefreshAt, setLastRefreshAt] = useState(0)
   const supported = directAccessSupported || portableAccessSupported || runtimeAvailable
   const fileHandlesRef = useRef(new Map())
   const directoryHandlesRef = useRef(new Map())
@@ -197,6 +203,8 @@ export default function useLocalWorkspace() {
   const projectSessionsRef = useRef(new Map())
   const workspaceOperationsRef = useRef(0)
   const projectTransitionRef = useRef(false)
+  const scanPromiseRef = useRef(null)
+  const treeSignatureRef = useRef("")
 
   useEffect(() => {
     let cancelled = false
@@ -308,8 +316,10 @@ export default function useLocalWorkspace() {
     sessionChangesRef.current = Array.isArray(snapshot.sessionChanges) ? snapshot.sessionChanges : []
     setRootHandle(snapshot.handle)
     setRootName(snapshot.rootName || snapshot.handle.name || "workspace")
+    const restoredPaths = Array.isArray(snapshot.filePaths) ? snapshot.filePaths : []
+    treeSignatureRef.current = restoredPaths.join("\n")
     setTree(Array.isArray(snapshot.tree) ? snapshot.tree : [])
-    setFilePaths(Array.isArray(snapshot.filePaths) ? snapshot.filePaths : [])
+    setFilePaths(restoredPaths)
     setTabs(tabsRef.current)
     setActivePath(snapshot.activePath || "")
     setContextPaths(Array.isArray(snapshot.contextPaths) ? snapshot.contextPaths : [])
@@ -330,6 +340,7 @@ export default function useLocalWorkspace() {
     baselineRef.current = new Map()
     tabsRef.current = []
     sessionChangesRef.current = []
+    treeSignatureRef.current = ""
     setRootHandle(null)
     setRootName("")
     setTree([])
@@ -344,6 +355,7 @@ export default function useLocalWorkspace() {
     setGitWorktree(false)
     setSessionChanges([])
     setError("")
+    setLastRefreshAt(0)
     setWorkspaceSession(current => current + 1)
   }, [])
 
@@ -369,101 +381,158 @@ export default function useLocalWorkspace() {
     return permission
   }, [])
 
-  const scan = useCallback(async (handle, resetWorkspace = false, targetProjectId = activeProjectIdRef.current) => {
-    if (!handle) return
-    setScanning(true)
-    setError("")
-    const fileHandles = new Map()
-    const directoryHandles = new Map([["", handle]])
-    const paths = []
-    let count = 0
-
-    const walk = async (directoryHandle, prefix = "") => {
-      const entries = []
-      for await (const [name, child] of directoryHandle.entries()) {
-        if (child.kind === "directory" && ignoredDirectories.has(name)) continue
-        const path = normalizePath(prefix ? `${prefix}/${name}` : name)
-        if (isProtectedPath(path)) continue
-        if (child.kind === "file") {
-          if (count >= MAX_TREE_FILES) continue
-          count += 1
-          fileHandles.set(path, child)
-          paths.push(path)
-          entries.push({ type: "file", name, path, language: languageFor(path) })
-        } else {
-          directoryHandles.set(path, child)
-          const children = await walk(child, path)
-          if (children.length) entries.push({ type: "directory", name, path, children })
-        }
+  const scan = useCallback(async (handle, resetWorkspace = false, targetProjectId = activeProjectIdRef.current, options = {}) => {
+    if (!handle) return false
+    const background = options?.background === true
+    if (scanPromiseRef.current) {
+      if (background) return false
+      try {
+        await scanPromiseRef.current
+      } catch {
       }
-      return entries.sort(compareNodes)
     }
 
-    try {
-      const nextTree = await walk(handle)
-      const git = await detectGit(handle)
-      fileHandlesRef.current = fileHandles
-      directoryHandlesRef.current = directoryHandles
-      const sortedPaths = paths.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
-      setTree(nextTree)
-      setFilePaths(sortedPaths)
-      setRootHandle(handle)
-      const targetProject = targetProjectId ? projectsRef.current.find(project => project.id === targetProjectId) : null
-      setRootName(targetProject?.name || handle.name || "workspace")
-      setGitRepository(git.repository)
-      setGitBranch(git.branch)
-      setGitHead(git.head)
-      setGitDetached(git.detached)
-      setGitWorktree(git.worktree)
-      if (resetWorkspace) {
-        baselineRef.current = new Map()
-        sessionChangesRef.current = []
-        setSessionChanges([])
-        tabsRef.current = []
-        setTabs([])
-        setActivePath("")
-        setContextPaths([])
-      } else {
-        const refreshedTabs = []
-        for (const tab of tabsRef.current.filter(item => fileHandles.has(item.path))) {
-          if (tab.dirty) {
-            refreshedTabs.push(tab)
-            continue
-          }
-          try {
-            const file = await fileHandles.get(tab.path).getFile()
-            if (file.size <= MAX_FILE_BYTES && !(await looksBinary(file))) {
-              const content = await file.text()
-              refreshedTabs.push({ ...tab, content, savedContent: content, dirty: false })
-            } else {
-              refreshedTabs.push(tab)
-            }
-          } catch {
-            refreshedTabs.push(tab)
+    const execute = async () => {
+      if (!background) {
+        setScanning(true)
+        setError("")
+      }
+      const fileHandles = new Map()
+      const directoryHandles = new Map([["", handle]])
+      const paths = []
+      let count = 0
+
+      const walk = async (directoryHandle, prefix = "") => {
+        const entries = []
+        for await (const [name, child] of directoryHandle.entries()) {
+          if (child.kind === "directory" && ignoredDirectories.has(name)) continue
+          const path = normalizePath(prefix ? `${prefix}/${name}` : name)
+          if (child.kind === "file") {
+            if (count >= MAX_TREE_FILES) continue
+            count += 1
+            fileHandles.set(path, child)
+            paths.push(path)
+            entries.push({ type: "file", name, path, language: languageFor(path) })
+          } else {
+            directoryHandles.set(path, child)
+            const children = await walk(child, path)
+            if (children.length) entries.push({ type: "directory", name, path, children })
           }
         }
-        tabsRef.current = refreshedTabs
-        setTabs(refreshedTabs)
-        setActivePath(current => refreshedTabs.some(tab => tab.path === current) ? current : refreshedTabs[0]?.path || "")
-        setContextPaths(current => current.filter(path => fileHandles.has(path)))
+        return entries.sort(compareNodes)
       }
-      if (targetProjectId) {
-        commitProjects(values => values.map(project => project.id === targetProjectId ? {
-          ...project,
-          name: project.name || handle.name || "workspace",
-          fileCount: sortedPaths.length,
-          dirtyCount: resetWorkspace ? 0 : tabsRef.current.filter(tab => tab.dirty).length,
-          gitRepository: git.repository,
-          gitBranch: git.branch,
-          loaded: true,
-          permission: "granted"
-        } : project))
+
+      try {
+        const nextTree = await walk(handle)
+        const git = await detectGit(handle)
+        if (targetProjectId && activeProjectIdRef.current && targetProjectId !== activeProjectIdRef.current) return false
+        fileHandlesRef.current = fileHandles
+        directoryHandlesRef.current = directoryHandles
+        const sortedPaths = paths.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+        const nextTreeSignature = sortedPaths.join("\n")
+        const treeChanged = treeSignatureRef.current !== nextTreeSignature
+        treeSignatureRef.current = nextTreeSignature
+        if (resetWorkspace || treeChanged) {
+          setTree(nextTree)
+          setFilePaths(sortedPaths)
+        }
+        setRootHandle(handle)
+        const targetProject = targetProjectId ? projectsRef.current.find(project => project.id === targetProjectId) : null
+        setRootName(targetProject?.name || handle.name || "workspace")
+        setGitRepository(git.repository)
+        setGitBranch(git.branch)
+        setGitHead(git.head)
+        setGitDetached(git.detached)
+        setGitWorktree(git.worktree)
+        if (resetWorkspace) {
+          baselineRef.current = new Map()
+          sessionChangesRef.current = []
+          setSessionChanges([])
+          tabsRef.current = []
+          setTabs([])
+          setActivePath("")
+          setContextPaths([])
+        } else {
+          const currentTabs = tabsRef.current
+          const refreshedTabs = []
+          let tabsChanged = false
+          for (const tab of currentTabs) {
+            const fileHandle = fileHandles.get(tab.path)
+            if (!fileHandle) {
+              if (tab.dirty) {
+                const nextTab = tab.missingOnDisk ? tab : { ...tab, missingOnDisk: true }
+                if (nextTab !== tab) tabsChanged = true
+                refreshedTabs.push(nextTab)
+              } else {
+                tabsChanged = true
+              }
+              continue
+            }
+            if (tab.dirty) {
+              const nextTab = tab.missingOnDisk ? { ...tab, missingOnDisk: false } : tab
+              if (nextTab !== tab) tabsChanged = true
+              refreshedTabs.push(nextTab)
+              continue
+            }
+            try {
+              const file = await fileHandle.getFile()
+              if (file.size <= MAX_FILE_BYTES && !(await looksBinary(file))) {
+                const content = await file.text()
+                const lastModified = Number(file.lastModified || 0)
+                const size = Number(file.size || 0)
+                const changed = content !== tab.content || content !== tab.savedContent || lastModified !== Number(tab.diskLastModified || 0) || size !== Number(tab.diskSize ?? -1) || tab.missingOnDisk
+                if (!sessionChangesRef.current.some(change => change.path === tab.path)) baselineRef.current.set(tab.path, { exists: true, content })
+                const nextTab = changed ? { ...tab, content, savedContent: content, dirty: false, diskLastModified: lastModified, diskSize: size, missingOnDisk: false } : tab
+                if (nextTab !== tab) tabsChanged = true
+                refreshedTabs.push(nextTab)
+              } else {
+                const nextTab = tab.missingOnDisk ? { ...tab, missingOnDisk: false } : tab
+                if (nextTab !== tab) tabsChanged = true
+                refreshedTabs.push(nextTab)
+              }
+            } catch {
+              refreshedTabs.push(tab)
+            }
+          }
+          if (tabsChanged) {
+            tabsRef.current = refreshedTabs
+            setTabs(refreshedTabs)
+            setActivePath(current => refreshedTabs.some(tab => tab.path === current) ? current : refreshedTabs[0]?.path || "")
+          }
+          if (treeChanged) setContextPaths(current => {
+            const next = current.filter(path => fileHandles.has(path))
+            return next.length === current.length && next.every((path, index) => path === current[index]) ? current : next
+          })
+          if (!background || treeChanged || tabsChanged) setLastRefreshAt(Date.now())
+        }
+        if (targetProjectId) {
+          commitProjects(values => values.map(project => project.id === targetProjectId ? {
+            ...project,
+            name: project.name || handle.name || "workspace",
+            fileCount: sortedPaths.length,
+            dirtyCount: resetWorkspace ? 0 : tabsRef.current.filter(tab => tab.dirty).length,
+            gitRepository: git.repository,
+            gitBranch: git.branch,
+            loaded: true,
+            permission: "granted"
+          } : project))
+        }
+        if (resetWorkspace) setLastRefreshAt(Date.now())
+        return true
+      } catch (scanError) {
+        if (!background) setError(scanError.message || String(scanError))
+        throw scanError
+      } finally {
+        if (!background) setScanning(false)
       }
-    } catch (scanError) {
-      setError(scanError.message || String(scanError))
-      throw scanError
+    }
+
+    const promise = execute()
+    scanPromiseRef.current = promise
+    try {
+      return await promise
     } finally {
-      setScanning(false)
+      if (scanPromiseRef.current === promise) scanPromiseRef.current = null
     }
   }, [commitProjects])
 
@@ -1002,7 +1071,7 @@ export default function useLocalWorkspace() {
     }
   }, [rootHandle, activeProjectId])
 
-  const readPath = useCallback(async path => {
+  const readPathSnapshot = useCallback(async path => {
     const expectedProjectId = activeProjectId
     if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a leitura do arquivo.")
     const normalized = safeRelativePath(path)
@@ -1015,8 +1084,10 @@ export default function useLocalWorkspace() {
     if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a leitura do arquivo.")
     const content = await file.text()
     if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a leitura do arquivo.")
-    return content
+    return { content, lastModified: Number(file.lastModified || 0), size: Number(file.size || 0) }
   }, [activeProjectId])
+
+  const readPath = useCallback(async path => (await readPathSnapshot(path)).content, [readPathSnapshot])
 
   const openFile = useCallback(async path => {
     const expectedProjectId = activeProjectId
@@ -1027,10 +1098,10 @@ export default function useLocalWorkspace() {
       setActivePath(normalized)
       return current
     }
-    const content = await readPath(normalized)
+    const snapshot = await readPathSnapshot(normalized)
     if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a abertura do arquivo.")
-    if (!baselineRef.current.has(normalized)) baselineRef.current.set(normalized, { exists: true, content })
-    const tab = { path: normalized, name: basename(normalized), content, savedContent: content, dirty: false, language: languageFor(normalized) }
+    if (!baselineRef.current.has(normalized)) baselineRef.current.set(normalized, { exists: true, content: snapshot.content })
+    const tab = { path: normalized, name: basename(normalized), content: snapshot.content, savedContent: snapshot.content, dirty: false, language: languageFor(normalized), diskLastModified: snapshot.lastModified, diskSize: snapshot.size, missingOnDisk: false }
     setTabs(values => {
       const next = [...values, tab]
       tabsRef.current = next
@@ -1038,7 +1109,122 @@ export default function useLocalWorkspace() {
     })
     setActivePath(normalized)
     return tab
-  }, [activeProjectId, readPath])
+  }, [activeProjectId, readPathSnapshot])
+
+  const syncOpenFiles = useCallback(async () => {
+    if (!rootHandle || projectTransitionRef.current || workspaceOperationsRef.current || scanPromiseRef.current) return { updated: 0, structural: false }
+    const project = projectsRef.current.find(item => item.id === activeProjectIdRef.current)
+    if (project?.mode === "portable") return { updated: 0, structural: false }
+    const expectedProjectId = activeProjectIdRef.current
+    const currentTabs = tabsRef.current
+    if (!currentTabs.length) return { updated: 0, structural: false }
+    let nextTabs = currentTabs
+    let updated = 0
+    let structural = false
+
+    for (let index = 0; index < currentTabs.length; index += 1) {
+      const tab = currentTabs[index]
+      if (tab.dirty) continue
+      const handle = fileHandlesRef.current.get(tab.path)
+      if (!handle) {
+        structural = true
+        continue
+      }
+      try {
+        let file = null
+        let metadata
+        if (typeof handle.getMetadata === "function") metadata = await handle.getMetadata()
+        else {
+          file = await handle.getFile()
+          metadata = { size: Number(file.size || 0), lastModified: Number(file.lastModified || 0) }
+        }
+        if (expectedProjectId !== activeProjectIdRef.current) return { updated: 0, structural: false }
+        const sameVersion = Number(tab.diskLastModified || 0) === Number(metadata.lastModified || 0) && Number(tab.diskSize ?? -1) === Number(metadata.size ?? -1) && !tab.missingOnDisk
+        if (sameVersion) continue
+        if (!file) file = await handle.getFile()
+        if (file.size > MAX_FILE_BYTES || await looksBinary(file)) continue
+        const content = await file.text()
+        if (expectedProjectId !== activeProjectIdRef.current) return { updated: 0, structural: false }
+        const nextTab = { ...tab, content, savedContent: content, dirty: false, diskLastModified: Number(file.lastModified || metadata.lastModified || 0), diskSize: Number(file.size || metadata.size || 0), missingOnDisk: false }
+        if (nextTabs === currentTabs) nextTabs = [...currentTabs]
+        nextTabs[index] = nextTab
+        if (!sessionChangesRef.current.some(change => change.path === tab.path)) baselineRef.current.set(tab.path, { exists: true, content })
+        if (content !== tab.content || tab.missingOnDisk) updated += 1
+      } catch (syncError) {
+        if (syncError?.name === "NotFoundError" || syncError?.status === 404) structural = true
+      }
+    }
+
+    if (nextTabs !== currentTabs && expectedProjectId === activeProjectIdRef.current) {
+      tabsRef.current = nextTabs
+      setTabs(nextTabs)
+      setLastRefreshAt(Date.now())
+    }
+    return { updated, structural }
+  }, [rootHandle])
+
+  useEffect(() => {
+    if (!rootHandle) return undefined
+    const project = projectsRef.current.find(item => item.id === activeProjectIdRef.current)
+    if (project?.mode === "portable") return undefined
+    let disposed = false
+    let fileTimer = null
+    let treeTimer = null
+
+    const refreshTree = async () => {
+      if (disposed || document.visibilityState === "hidden" || projectTransitionRef.current || workspaceOperationsRef.current) return
+      try {
+        await scan(rootHandle, false, activeProjectIdRef.current, { background: true })
+      } catch {
+      }
+    }
+
+    const refreshOpenFiles = async () => {
+      if (disposed || document.visibilityState === "hidden") return null
+      try {
+        const result = await syncOpenFiles()
+        if (result.structural) await refreshTree()
+        return result
+      } catch {
+        return null
+      }
+    }
+
+    const scheduleFiles = () => {
+      if (disposed) return
+      fileTimer = window.setTimeout(async () => {
+        await refreshOpenFiles()
+        scheduleFiles()
+      }, AUTO_FILE_REFRESH_MS)
+    }
+
+    const scheduleTree = () => {
+      if (disposed) return
+      treeTimer = window.setTimeout(async () => {
+        await refreshTree()
+        scheduleTree()
+      }, AUTO_TREE_REFRESH_MS)
+    }
+
+    const refreshWhenVisible = async () => {
+      if (document.visibilityState === "hidden") return
+      const result = await refreshOpenFiles()
+      if (!result?.structural) await refreshTree()
+    }
+
+    window.addEventListener("focus", refreshWhenVisible)
+    document.addEventListener("visibilitychange", refreshWhenVisible)
+    scheduleFiles()
+    scheduleTree()
+
+    return () => {
+      disposed = true
+      if (fileTimer) window.clearTimeout(fileTimer)
+      if (treeTimer) window.clearTimeout(treeTimer)
+      window.removeEventListener("focus", refreshWhenVisible)
+      document.removeEventListener("visibilitychange", refreshWhenVisible)
+    }
+  }, [activeProjectId, rootHandle, scan, syncOpenFiles])
 
   const updateContent = useCallback((path, content) => {
     const normalized = normalizePath(path)
@@ -1166,7 +1352,7 @@ export default function useLocalWorkspace() {
     const priority = []
     const add = path => {
       const normalized = normalizePath(path)
-      if (normalized && fileHandlesRef.current.has(normalized) && !priority.includes(normalized)) priority.push(normalized)
+      if (normalized && !isSensitivePath(normalized) && fileHandlesRef.current.has(normalized) && !priority.includes(normalized)) priority.push(normalized)
     }
     add(activePath)
     for (const tab of tabsRef.current) add(tab.path)
@@ -1200,10 +1386,11 @@ export default function useLocalWorkspace() {
       }
     }
 
+    const agentManifestPaths = filePaths.filter(path => !isSensitivePath(path))
     return {
       projectId: expectedProjectId || null,
       rootName,
-      activeFile: activePath || null,
+      activeFile: activePath && !isSensitivePath(activePath) ? activePath : null,
       git: {
         repository: gitRepository,
         branch: gitBranch || null,
@@ -1211,8 +1398,8 @@ export default function useLocalWorkspace() {
         detached: gitDetached,
         worktree: gitWorktree
       },
-      manifest: filePaths.slice(0, MAX_TREE_FILES),
-      manifestTruncated: filePaths.length >= MAX_TREE_FILES,
+      manifest: agentManifestPaths.slice(0, MAX_TREE_FILES),
+      manifestTruncated: agentManifestPaths.length >= MAX_TREE_FILES,
       files,
       stats: { fileCount: filePaths.length, contextFileCount: files.length, contextBytes: totalBytes }
     }
@@ -1420,6 +1607,7 @@ export default function useLocalWorkspace() {
     contextPaths,
     scanning,
     error,
+    lastRefreshAt,
     dirtyCount,
     autoApply,
     workspaceSession,

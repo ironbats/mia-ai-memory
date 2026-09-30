@@ -121,6 +121,12 @@ class RuntimeFileHandle {
     return new File([buffer], this.name, { type: response.headers.get("Content-Type") || "", lastModified })
   }
 
+  async getMetadata() {
+    const body = await request(`/api/v1/runtime/workspaces/${encodeURIComponent(this.workspaceId)}/stat?path=${encodeURIComponent(this.path)}`)
+    if (body.kind !== "file") throw Object.assign(new Error(`Caminho não é um arquivo: ${this.path}`), { name: "TypeMismatchError" })
+    return { size: Number(body.size || 0), lastModified: Number(body.lastModified || 0) }
+  }
+
   async createWritable() {
     return new RuntimeWritableFile(this)
   }

@@ -13,7 +13,7 @@ const projectMeta = project => {
 
 const projectMode = project => project?.mode === "portable" ? "Browser" : project?.mode === "runtime" ? "Host" : "Local"
 
-export default function ProjectSwitcher({ workspace, onAddProject, onSelectProject, onRemoveProject }) {
+export default function ProjectSwitcher({ workspace, onAddProject, onSelectProject, onRemoveProject, onRefreshProject, maximized = false, onToggleMaximize }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const rootRef = useRef(null)
@@ -83,6 +83,12 @@ export default function ProjectSwitcher({ workspace, onAddProject, onSelectProje
     await onAddProject()
   }
 
+  const refreshProject = async () => {
+    if (!workspace.isReady || disabled) return
+    setOpen(false)
+    await onRefreshProject?.()
+  }
+
   const removeProject = async (event, project) => {
     event.stopPropagation()
     const removed = await onRemoveProject(project)
@@ -121,6 +127,28 @@ export default function ProjectSwitcher({ workspace, onAddProject, onSelectProje
       >
         <span>＋</span><strong>{workspace.runtimeAvailable || workspace.directAccessSupported ? "Projeto" : "Importar"}</strong>
       </button>
+
+      <button
+        type="button"
+        className="ide-project-refresh-primary"
+        onClick={refreshProject}
+        disabled={!workspace.isReady || disabled}
+        title={workspace.lastRefreshAt ? `Atualizar projeto do disco · última sincronização ${new Date(workspace.lastRefreshAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Atualizar projeto do disco"}
+      >
+        <span className={workspace.scanning ? "spinning" : ""}>↻</span><strong>{workspace.scanning ? "Atualizando" : "Refresh"}</strong>
+      </button>
+
+      {onToggleMaximize ? (
+        <button
+          type="button"
+          className={`ide-project-maximize-primary${maximized ? " active" : ""}`}
+          onClick={onToggleMaximize}
+          aria-pressed={maximized}
+          title={maximized ? "Restaurar navegação completa do AI Memory" : "Maximizar workspace e manter somente IDE + chat"}
+        >
+          <span>{maximized ? "↙" : "⛶"}</span><strong>{maximized ? "Restaurar" : "Maximizar"}</strong>
+        </button>
+      ) : null}
 
       {open ? (
         <div className="ide-project-menu" role="dialog" aria-label="Projetos da IDE">

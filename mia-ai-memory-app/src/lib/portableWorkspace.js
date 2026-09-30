@@ -10,16 +10,9 @@ const ignoredDirectories = new Set([
   "node_modules", "dist", "build", "target", "vendor", ".next", ".nuxt", ".cache", "coverage", ".gradle", ".terraform", ".idea", "__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "venv"
 ])
 
-const protectedNames = new Set([".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519"])
 
 const normalizePath = value => String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "")
 const basename = path => normalizePath(path).split("/").pop() || ""
-
-const extension = path => {
-  const name = basename(path)
-  const index = name.lastIndexOf(".")
-  return index > 0 ? name.slice(index + 1).toLowerCase() : ""
-}
 
 const notFoundError = message => {
   const error = new Error(message)
@@ -27,16 +20,11 @@ const notFoundError = message => {
   return error
 }
 
-const isProtectedPath = path => {
+const isExcludedImportPath = path => {
   const normalized = normalizePath(path)
   const segments = normalized.split("/")
   if (!normalized || normalized.startsWith("../") || normalized.includes("/../") || normalized.includes("\0")) return true
-  if (segments.some(segment => ignoredDirectories.has(segment))) return true
-  const name = basename(normalized).toLowerCase()
-  if (protectedNames.has(name)) return true
-  if (name.startsWith(".env.") && name !== ".env.example") return true
-  if (["pem", "key", "p12", "pfx", "jks", "keystore"].includes(extension(name))) return true
-  return false
+  return segments.some(segment => ignoredDirectories.has(segment))
 }
 
 const isAllowedGitMetadata = path => {
@@ -184,7 +172,7 @@ const candidateFromFile = (path, file) => ({
 
 const validateCandidate = (candidates, seenPaths, path, file) => {
   const normalized = normalizePath(path)
-  if (!normalized || isProtectedPath(normalized) || !isAllowedGitMetadata(normalized)) return 0
+  if (!normalized || isExcludedImportPath(normalized) || !isAllowedGitMetadata(normalized)) return 0
   if (seenPaths.has(normalized)) throw new Error(`O projeto contém caminhos duplicados: ${normalized}`)
   seenPaths.add(normalized)
   if (candidates.length >= MAX_PORTABLE_FILES) throw new Error(`O projeto possui mais de ${MAX_PORTABLE_FILES} arquivos úteis. Remova dependências e artefatos gerados antes de importar.`)
@@ -213,7 +201,7 @@ const collectLegacyDirectory = async (directoryEntry, candidates, prefix = "", s
   let bytes = 0
   for (const entry of entries) {
     const path = normalizePath(prefix ? `${prefix}/${entry.name}` : entry.name)
-    if (!path || isProtectedPath(path) || !isAllowedGitMetadata(path)) continue
+    if (!path || isExcludedImportPath(path) || !isAllowedGitMetadata(path)) continue
     if (entry.isDirectory) {
       bytes += await collectLegacyDirectory(entry, candidates, path, seenPaths)
       continue
@@ -229,7 +217,7 @@ const collectHandleDirectory = async (directoryHandle, candidates, prefix = "", 
   let bytes = 0
   for await (const [name, child] of directoryHandle.entries()) {
     const path = normalizePath(prefix ? `${prefix}/${name}` : name)
-    if (!path || isProtectedPath(path) || !isAllowedGitMetadata(path)) continue
+    if (!path || isExcludedImportPath(path) || !isAllowedGitMetadata(path)) continue
     if (child.kind === "directory") {
       bytes += await collectHandleDirectory(child, candidates, path, seenPaths)
       continue
@@ -752,7 +740,7 @@ export const importPortableWorkspaceFromZip = async file => {
   for (const entry of entries) {
     if (entry.directory) continue
     const path = normalizePath(root && entry.name.startsWith(`${root}/`) ? entry.name.slice(root.length + 1) : entry.name)
-    if (!path || isProtectedPath(path) || !isAllowedGitMetadata(path)) continue
+    if (!path || isExcludedImportPath(path) || !isAllowedGitMetadata(path)) continue
     if (candidates.length + usefulEntries.length >= MAX_PORTABLE_FILES) throw new Error(`O projeto possui mais de ${MAX_PORTABLE_FILES} arquivos úteis. Remova dependências e artefatos gerados antes de importar.`)
     totalBytes += Number(entry.uncompressedSize || 0)
     if (totalBytes > MAX_PORTABLE_UNCOMPRESSED_BYTES) throw new Error(`O projeto útil ultrapassa ${Math.round(MAX_PORTABLE_UNCOMPRESSED_BYTES / 1024 / 1024)} MB descompactados. Remova dependências e artefatos gerados antes de importar.`)

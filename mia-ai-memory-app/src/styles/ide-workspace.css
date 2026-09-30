@@ -923,6 +923,8 @@
 
 .ide-project-trigger:focus-visible,
 .ide-project-add-primary:focus-visible,
+.ide-project-refresh-primary:focus-visible,
+.ide-project-maximize-primary:focus-visible,
 .ide-project-item-main:focus-visible,
 .ide-project-item-remove:focus-visible,
 .ide-project-menu-head > button:focus-visible {
@@ -931,7 +933,9 @@
 }
 
 .ide-project-trigger:disabled,
-.ide-project-add-primary:disabled {
+.ide-project-add-primary:disabled,
+.ide-project-refresh-primary:disabled,
+.ide-project-maximize-primary:disabled {
   opacity: .55;
   cursor: wait;
 }
@@ -1017,7 +1021,9 @@
   transform: rotate(180deg);
 }
 
-.ide-project-add-primary {
+.ide-project-add-primary,
+.ide-project-refresh-primary,
+.ide-project-maximize-primary {
   min-width: 72px;
   min-height: calc(var(--ide-control-height) + 10px);
   display: inline-flex;
@@ -1039,14 +1045,45 @@
   line-height: 1;
 }
 
-.ide-project-add-primary strong {
+.ide-project-refresh-primary span {
+  color: #7fdcc2;
+  font-size: var(--ide-font-lg);
+  line-height: 1;
+  transform-origin: center;
+}
+
+.ide-project-maximize-primary span {
+  color: #b8afff;
+  font-size: var(--ide-font-lg);
+  line-height: 1;
+}
+
+.ide-project-maximize-primary.active {
+  border-color: rgba(143, 130, 255, .62);
+  background: rgba(143, 130, 255, .14);
+  color: #ded9ff;
+}
+
+.ide-project-refresh-primary span.spinning {
+  animation: ide-project-refresh-spin .8s linear infinite;
+}
+
+@keyframes ide-project-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ide-project-add-primary strong,
+.ide-project-refresh-primary strong,
+.ide-project-maximize-primary strong {
   max-width: none;
   color: inherit;
   font-size: var(--ide-font-sm);
   font-weight: 800;
 }
 
-.ide-project-add-primary:hover:not(:disabled) {
+.ide-project-add-primary:hover:not(:disabled),
+.ide-project-refresh-primary:hover:not(:disabled),
+.ide-project-maximize-primary:hover:not(:disabled) {
   border-color: rgba(143, 130, 255, .5);
   background: rgba(143, 130, 255, .09);
   color: #d6d1ff;
@@ -1442,11 +1479,15 @@
     min-width: 0;
   }
 
-  .ide-project-add-primary {
+  .ide-project-add-primary,
+  .ide-project-refresh-primary,
+  .ide-project-maximize-primary {
     min-width: 56px;
   }
 
-  .ide-project-add-primary strong {
+  .ide-project-add-primary strong,
+  .ide-project-refresh-primary strong,
+  .ide-project-maximize-primary strong {
     display: none;
   }
 
