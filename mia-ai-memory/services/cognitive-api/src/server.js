@@ -6,6 +6,7 @@ import { repository } from "./repository.js"
 import { createQueryEmbedding } from "./embedding-client.js"
 import { integrationService } from "./integration-service.js"
 import { chatService } from "./chat-service.js"
+import { skillService } from "./skill-service.js"
 import { syncCognitiveReadModel } from "./sync-service.js"
 
 const send = (res, status, body) => {
@@ -15,7 +16,7 @@ const send = (res, status, body) => {
     "Content-Length": Buffer.byteLength(payload),
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": config.corsOrigin,
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Token",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Token, Prefer",
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Expose-Headers": "Content-Disposition"
   })
@@ -30,7 +31,7 @@ const sendBinary = (res, status, body, contentType, fileName) => {
     "Content-Disposition": `attachment; filename="${safeName}"`,
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": config.corsOrigin,
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Token",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Token, Prefer",
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Expose-Headers": "Content-Disposition"
   })
@@ -263,6 +264,30 @@ export const createServer = () => http.createServer(async (req, res) => {
       const { workspace, project } = requiredScope(url)
       return send(res, 200, await chatService.bootstrap(workspace, project))
     }
+    if (url.pathname === "/api/v1/cognitive/chat/skills" && req.method === "GET") {
+      requireAdmin(req)
+      const { workspace, project } = requiredScope(url)
+      return send(res, 200, { skills: await skillService.list(workspace, project) })
+    }
+    if (url.pathname === "/api/v1/cognitive/chat/skills" && req.method === "POST") {
+      requireAdmin(req)
+      const { workspace, project } = requiredScope(url)
+      const fileName = url.searchParams.get("filename")?.trim()
+      const buffer = await readBuffer(req, config.chatSkillMaxBytes)
+      return send(res, 201, { skill: await skillService.upload(workspace, project, fileName, buffer) })
+    }
+    const chatSkillMatch = url.pathname.match(/^\/api\/v1\/cognitive\/chat\/skills\/([^/]+)$/)
+    if (chatSkillMatch && req.method === "PATCH") {
+      requireAdmin(req)
+      const { workspace, project } = requiredScope(url)
+      const body = await readJson(req)
+      return send(res, 200, { skill: await skillService.setEnabled(chatSkillMatch[1], workspace, project, body.enabled) })
+    }
+    if (chatSkillMatch && req.method === "DELETE") {
+      requireAdmin(req)
+      const { workspace, project } = requiredScope(url)
+      return send(res, 200, await skillService.delete(chatSkillMatch[1], workspace, project))
+    }
     if (req.method === "POST" && url.pathname === "/api/v1/cognitive/chat/conversations") {
       requireAdmin(req)
       return send(res, 201, { conversation: await chatService.createConversation(await readJson(req)) })
@@ -270,7 +295,14 @@ export const createServer = () => http.createServer(async (req, res) => {
     const chatMessageMatch = url.pathname.match(/^\/api\/v1\/cognitive\/chat\/conversations\/([^/]+)\/messages$/)
     if (chatMessageMatch && req.method === "POST") {
       requireAdmin(req)
-      return send(res, 200, await chatService.sendMessage(chatMessageMatch[1], await readJson(req, config.chatWorkspaceRequestMaxBytes)))
+      const asyncExecution = /(?:^|,)\s*respond-async\s*(?:,|$)/i.test(String(req.headers.prefer || ""))
+      const result = await chatService.sendMessage(chatMessageMatch[1], await readJson(req, config.chatWorkspaceRequestMaxBytes), { async: asyncExecution })
+      return send(res, asyncExecution ? 202 : 200, result)
+    }
+    const chatSingleMessageMatch = url.pathname.match(/^\/api\/v1\/cognitive\/chat\/conversations\/([^/]+)\/messages\/([^/]+)$/)
+    if (chatSingleMessageMatch && req.method === "GET") {
+      requireAdmin(req)
+      return send(res, 200, { message: await chatService.message(chatSingleMessageMatch[1], chatSingleMessageMatch[2]) })
     }
     const chatCodeChangeExportMatch = url.pathname.match(/^\/api\/v1\/cognitive\/chat\/conversations\/([^/]+)\/messages\/([^/]+)\/code-change-export$/)
     if (chatCodeChangeExportMatch && req.method === "GET") {

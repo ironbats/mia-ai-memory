@@ -40,6 +40,9 @@ start_runtime() {
   node_major="$(node -p "Number(process.versions.node.split('.')[0])")"
   [[ "$node_major" -ge 22 ]] || fail "Node.js 22 ou superior e obrigatorio para o Workspace Runtime. Versao atual: $(node --version)"
   [[ -f "$RUNTIME_ENTRY" ]] || fail "Workspace Runtime nao encontrado em $RUNTIME_ENTRY"
+  if ! (cd "$(dirname "$(dirname "$RUNTIME_ENTRY")")" && node --input-type=module -e "await import('node-pty')") >/dev/null 2>&1; then
+    printf 'AVISO: PTY interativo indisponivel. Execute npm ci em services/workspace-runtime e reinicie o runtime. O modo de comandos continua disponivel.\n' >&2
+  fi
   mkdir -p "$RUNTIME_DIR"
   if runtime_running; then
     printf 'Workspace Runtime ja esta em execucao. PID %s\n' "$(runtime_pid)"

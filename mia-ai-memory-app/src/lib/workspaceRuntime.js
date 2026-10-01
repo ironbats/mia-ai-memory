@@ -1,7 +1,7 @@
 const DEFAULT_RUNTIME_URL = "http://127.0.0.1:8791"
 const TOKEN_KEY = "ai-memory.workspace-runtime.token"
 
-const baseUrl = () => String(import.meta.env.VITE_WORKSPACE_RUNTIME_URL || DEFAULT_RUNTIME_URL).replace(/\/$/, "")
+const baseUrl = () => String(import.meta.env?.VITE_WORKSPACE_RUNTIME_URL || DEFAULT_RUNTIME_URL).replace(/\/$/, "")
 
 const runtimeToken = () => {
   try {
@@ -67,6 +67,29 @@ const request = async (path, options = {}, responseType = "json") => {
     return execute(paired.token)
   }
 }
+
+// PTY reads long-poll; a finite transport deadline also bounds dead connections.
+// Cancellation never retries input: an uncertain write must not execute twice.
+const ptyRequest = async (path, options = {}) => {
+  const controller = new AbortController()
+  const external = options.signal
+  const abort = () => controller.abort(external?.reason)
+  if (external?.aborted) abort()
+  else external?.addEventListener("abort", abort, { once: true })
+  const timer = setTimeout(() => controller.abort(), 30000)
+  try {
+    return await request(path, { ...options, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+    external?.removeEventListener("abort", abort)
+  }
+}
+
+const ptyPath = (workspaceId, sessionId = "") => {
+  if (!workspaceId) throw new Error("Workspace Runtime indisponível para o projeto ativo.")
+  return `/api/v1/runtime/workspaces/${encodeURIComponent(workspaceId)}/terminal/pty${sessionId ? `/${encodeURIComponent(sessionId)}` : ""}`
+}
+const jsonRequest = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
 
 const normalizePath = value => String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "")
 const basename = value => normalizePath(value).split("/").pop() || ""
@@ -255,8 +278,31 @@ export const workspaceRuntime = {
     })
     return body
   },
+  async terminalContext(workspaceId, maxChars = 131072) {
+    const value = Math.max(8192, Math.min(262144, Number(maxChars) || 131072))
+    return request(`/api/v1/runtime/workspaces/${encodeURIComponent(workspaceId)}/terminal/context?maxChars=${encodeURIComponent(value)}`)
+  },
   async poll(workspaceId, sessionId, cursor = 0) {
     return request(`/api/v1/runtime/workspaces/${encodeURIComponent(workspaceId)}/terminal/sessions/${encodeURIComponent(sessionId)}?cursor=${encodeURIComponent(cursor)}`)
+  },
+  async listPty(workspaceId, options = {}) {
+    return ptyRequest(ptyPath(workspaceId), options)
+  },
+  async createPty(workspaceId, options = {}) {
+    const { signal, ...body } = options
+    return ptyRequest(ptyPath(workspaceId), { ...jsonRequest("POST", body), signal })
+  },
+  async pollPty(workspaceId, sessionId, cursor = 0, options = {}) {
+    return ptyRequest(`${ptyPath(workspaceId, sessionId)}?cursor=${encodeURIComponent(cursor)}&waitMs=20000`, options)
+  },
+  async writePty(workspaceId, sessionId, data) {
+    return ptyRequest(`${ptyPath(workspaceId, sessionId)}/input`, jsonRequest("POST", { data }))
+  },
+  async resizePty(workspaceId, sessionId, cols, rows) {
+    return ptyRequest(`${ptyPath(workspaceId, sessionId)}/resize`, jsonRequest("POST", { cols, rows }))
+  },
+  async closePty(workspaceId, sessionId) {
+    return ptyRequest(ptyPath(workspaceId, sessionId), { method: "DELETE" })
   },
   async stop(workspaceId, sessionId) {
     return request(`/api/v1/runtime/workspaces/${encodeURIComponent(workspaceId)}/terminal/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" })

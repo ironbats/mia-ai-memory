@@ -6,6 +6,7 @@ import "./styles.css"
 import "./styles/ide-workspace.css"
 import "./styles/chat-workspace.css"
 import "./styles/workspace-ux.css"
+import "./styles/ide-terminal.css"
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>

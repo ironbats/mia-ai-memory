@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added optional authenticated workspace-scoped PTY shells with xterm.js rendering, interactive input, independent tabs, resize, bounded reconnectable sessions, terminal search and workbench maximize/restore controls. Kept the existing command and browser consoles as fallbacks.
+- Added scoped command-console tabs, keyboard controls, scroll-follow and bounded per-tab output to the Cognitive Console IDE terminal. Closing the panel and switching projects retain session state within the mounted IDE.
 - Added a PostgreSQL-backed Agent & MCP Registry to the Cognitive Console with generic agent profiles, reusable MCP server definitions, agent-to-MCP bindings, encrypted reusable credentials, masked secret metadata, credential rotation, enable/disable controls, configuration audit history, and observed-session correlation. Credential payloads are encrypted in the Cognitive API with AES-256-GCM using `COGNITIVE_CREDENTIALS_MASTER_KEY_BASE64`; plaintext secret values are never returned by the API.
 - Added `script/run-local.sh` for deterministic local backend startup with Docker validation, automatic local env initialization, Compose build/start, service health checks, and failure diagnostics.
 - Added an optional React Cognitive Console with a PostgreSQL observability
@@ -35,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now uses the import instead of a prose pointer (#680).
 
 ### Fixed
+- Fixed terminal polling races and long-output cursor truncation, preserved split UTF-8 output, and bounded stop escalation for runtime-owned processes. Workspace removal and runtime shutdown now request process cleanup.
 - A `purge-session` whose page-file cleanup failed was undone by the next
   watcher pass. The cleanup failure is reported in `files_failed` and leaves
   the database rows deleted while `sessions/<id>.md` is still on disk; nothing

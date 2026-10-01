@@ -47,4 +47,4 @@ evals/runs/
 *.bak-*
 evals/datasets/
 evals/models/
-nodemodules
+node_modules/

@@ -4,15 +4,30 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "dev": "node script/run-vite.mjs dev --host 0.0.0.0",
+    "build": "node script/run-vite.mjs build",
+    "preview": "node script/run-vite.mjs preview --host 0.0.0.0",
+    "test": "node --import ./tests/register-jsx.js --test tests/*.test.js",
+    "test:browser": "node tests/terminal.browser.cjs",
+    "deps:ensure": "node script/ensure-dependencies.mjs",
+    "deps:check": "node script/ensure-dependencies.mjs --check",
+    "pretest": "node script/ensure-dependencies.mjs",
+    "pretest:browser": "node script/ensure-dependencies.mjs",
+    "test:startup": "node --test tests/startup.integration.mjs"
   },
   "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/xterm": "6.0.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "jsdom": "^27.4.0",
+    "playwright": "^1.62.1",
     "vite": "8.2.2"
+  },
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
   }
 }

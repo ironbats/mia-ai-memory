@@ -6,13 +6,16 @@ import path from "node:path"
 import crypto from "node:crypto"
 import { execFile, spawn, spawnSync } from "node:child_process"
 import { URL } from "node:url"
+import { appendTerminalOutput, createTerminalOutput, readTerminalOutput } from "./terminal-output.js"
+import { createPtyManager, PTY_JSON_MAX_BYTES, PTY_POLL_MAX_MS, terminalCursor } from "./pty-manager.js"
+import { terminatePty } from "./pty-native.js"
 
 const HOST = process.env.AI_MEMORY_WORKSPACE_RUNTIME_HOST || "127.0.0.1"
 const PORT = Number.parseInt(process.env.AI_MEMORY_WORKSPACE_RUNTIME_PORT || "8791", 10)
 const MAX_JSON_BYTES = 1024 * 1024
 const MAX_WRITE_BYTES = 16 * 1024 * 1024
-const MAX_TERMINAL_OUTPUT_BYTES = 4 * 1024 * 1024
 const MAX_TERMINAL_SESSIONS = 80
+const TERMINAL_STOP_GRACE_MS = 1000
 const RUNTIME_DIR = path.join(os.homedir(), ".ai-memory")
 const REGISTRY_FILE = process.env.AI_MEMORY_WORKSPACE_RUNTIME_REGISTRY || path.join(RUNTIME_DIR, "workspace-runtime.json")
 const configuredOrigins = String(process.env.AI_MEMORY_WORKSPACE_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174")
@@ -24,6 +27,15 @@ const workspaces = new Map()
 const terminals = new Map()
 const terminalCwds = new Map()
 const runtimeToken = crypto.randomBytes(32).toString("base64url")
+let ptyManager = null
+try {
+  const nativePty = await import("node-pty")
+  ptyManager = createPtyManager({ spawnPty: nativePty.spawn, terminate: terminatePty })
+} catch {
+  // The command terminal and file APIs must survive a missing native build.
+  process.stderr.write("Interactive PTY unavailable; install workspace-runtime dependencies to enable it.\n")
+}
+const ptyCapabilities = () => ({ pty: Boolean(ptyManager), ...(!ptyManager ? { ptyReason: "Native PTY or supported shell unavailable; reinstall runtime dependencies" } : {}) })
 
 const allowedOrigin = origin => {
   if (!origin) return true
@@ -81,14 +93,20 @@ const readBuffer = async (req, maxBytes) => {
   return Buffer.concat(chunks)
 }
 
-const readJson = async req => {
-  const body = await readBuffer(req, MAX_JSON_BYTES)
+const readJson = async (req, maxBytes = MAX_JSON_BYTES) => {
+  const body = await readBuffer(req, maxBytes)
   if (!body.length) return {}
   try {
     return JSON.parse(body.toString("utf8"))
   } catch {
     throw failure("invalid JSON body", 400, "INVALID_JSON")
   }
+}
+
+const readPtyJson = async req => {
+  const body = await readJson(req, PTY_JSON_MAX_BYTES)
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw failure("JSON object required", 400, "INVALID_JSON")
+  return body
 }
 
 const normalizeRelative = value => {
@@ -288,6 +306,15 @@ const gitInfo = workspace => {
 
 const stripAnsi = value => String(value || "").replace(/[\u001b\u009b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g, "")
 
+const sanitizeTerminalText = value => stripAnsi(value)
+  .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|passwd|secret|token|cookie)\s*(?:=|:)\s*)([^\s]+)/gi, "$1[REDACTED]")
+  .replace(/((?:--)?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|password|passwd|secret|token)\s+)([^\s]+)/gi, "$1[REDACTED]")
+  .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]")
+  .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[REDACTED]")
+  .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED]")
+  .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[REDACTED]")
+  .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{12,}={0,2}/gi, "$1[REDACTED]")
+
 const terminalCwdFor = workspace => {
   const current = terminalCwds.get(workspace.id) || ""
   const resolved = path.resolve(workspace.root, current || ".")
@@ -339,7 +366,7 @@ const startTerminalCommand = async (workspace, command) => {
       cwd: relativeCwd(workspace, resolved),
       running: false,
       exitCode: 0,
-      output: "",
+      ...createTerminalOutput(),
       startedAt: new Date().toISOString(),
       endedAt: new Date().toISOString(),
       builtin: true
@@ -363,20 +390,25 @@ const startTerminalCommand = async (workspace, command) => {
     running: true,
     exitCode: null,
     signal: null,
-    output: "",
+    ...createTerminalOutput(),
     startedAt: new Date().toISOString(),
     endedAt: null,
     pid: child.pid,
+    stopTimer: null,
     child
   }
   const append = chunk => {
-    session.output += stripAnsi(chunk.toString("utf8"))
-    if (Buffer.byteLength(session.output, "utf8") > MAX_TERMINAL_OUTPUT_BYTES) session.output = session.output.slice(-MAX_TERMINAL_OUTPUT_BYTES)
+    appendTerminalOutput(session, stripAnsi(chunk))
   }
+  // Each pipe needs its own decoder so split UTF-8 characters survive chunks.
+  child.stdout.setEncoding("utf8")
+  child.stderr.setEncoding("utf8")
   child.stdout.on("data", append)
   child.stderr.on("data", append)
   child.on("error", error => append(`${error.message || error}\n`))
   child.on("close", (code, signal) => {
+    clearTimeout(session.stopTimer)
+    session.stopTimer = null
     session.running = false
     session.exitCode = Number.isInteger(code) ? code : null
     session.signal = signal || null
@@ -390,7 +422,6 @@ const startTerminalCommand = async (workspace, command) => {
 }
 
 const terminalPayload = (session, cursor = 0) => {
-  const safeCursor = Math.max(0, Math.min(Number(cursor || 0), session.output.length))
   return {
     id: session.id,
     command: session.command,
@@ -400,26 +431,93 @@ const terminalPayload = (session, cursor = 0) => {
     signal: session.signal,
     startedAt: session.startedAt,
     endedAt: session.endedAt,
-    output: session.output.slice(safeCursor),
-    nextCursor: session.output.length,
+    ...readTerminalOutput(session, cursor),
+    builtin: Boolean(session.builtin),
     pid: session.pid || null
+  }
+}
+
+const terminalContextFor = async (workspace, maxChars = 131072) => {
+  const commandSessions = [...terminals.values()]
+    .filter(session => session.workspaceId === workspace.id)
+    .sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
+  const commandEntries = commandSessions.slice(0, 8).map(session => {
+    const nextCursor = session.outputOffset + session.output.length
+    const snapshot = terminalPayload(session, Math.max(0, nextCursor - 24000))
+    const status = snapshot.running ? "running" : snapshot.exitCode === null ? `signal=${snapshot.signal || "unknown"}` : `exit=${snapshot.exitCode}`
+    const output = sanitizeTerminalText(snapshot.output).trimEnd()
+    return {
+      startedAt: snapshot.startedAt,
+      truncated: snapshot.truncated || nextCursor > 24000,
+      block: [
+        `[COMMAND] ${snapshot.startedAt} cwd=${snapshot.cwd || "."} ${status}`,
+        `$ ${sanitizeTerminalText(snapshot.command)}`,
+        output
+      ].filter(Boolean).join("\n")
+    }
+  })
+
+  const ptySessions = ptyManager
+    ? ptyManager.list(workspace.id).sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
+    : []
+  const ptyEntries = []
+  for (const session of ptySessions.slice(0, 4)) {
+    const cursor = Math.max(0, Number(session.nextCursor || 0) - 24000)
+    const snapshot = await ptyManager.read(workspace.id, session.id, cursor, { waitMs: 0 })
+    const status = snapshot.running ? "running" : snapshot.exitCode === null ? `signal=${snapshot.signal || "unknown"}` : `exit=${snapshot.exitCode}`
+    const output = sanitizeTerminalText(snapshot.output).trimEnd()
+    ptyEntries.push({
+      startedAt: snapshot.startedAt,
+      truncated: snapshot.truncated || Number(snapshot.nextCursor || 0) > 24000,
+      block: [
+        `[PTY] ${snapshot.startedAt} cwd=${relativeCwd(workspace, snapshot.cwd || workspace.root) || "."} ${status}`,
+        `shell=${snapshot.shell}`,
+        output
+      ].filter(Boolean).join("\n")
+    })
+  }
+
+  const entries = [...commandEntries, ...ptyEntries].sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)))
+  const fullTranscript = entries.map(entry => entry.block).filter(Boolean).join("\n\n")
+  const transcript = fullTranscript.length > maxChars ? fullTranscript.slice(-maxChars) : fullTranscript
+  return {
+    capturedAt: new Date().toISOString(),
+    sessionCount: entries.length,
+    truncated: commandSessions.length > commandEntries.length || ptySessions.length > ptyEntries.length || entries.some(entry => entry.truncated) || fullTranscript.length > maxChars,
+    transcript
   }
 }
 
 const stopTerminal = session => {
   if (!session?.running || !session.child) return false
-  try {
-    if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(session.pid), "/T", "/F"], { stdio: "ignore" })
-    else process.kill(-session.pid, "SIGTERM")
-    return true
-  } catch {
+  if (session.stopTimer) return true
+  const child = session.child
+  const signal = name => {
     try {
-      session.child.kill("SIGTERM")
-      return true
+      if (process.platform === "win32") {
+        const result = spawnSync("taskkill", ["/PID", String(session.pid), "/T", "/F"], { stdio: "ignore" })
+        return !result.error && result.status === 0
+      } else {
+        process.kill(-session.pid, name)
+        return true
+      }
+    } catch {
+      if (process.platform === "win32") return false
+    }
+    try {
+      return child.kill(name)
     } catch {
       return false
     }
   }
+  if (!signal("SIGTERM")) return false
+  // Repeated stop requests must not postpone escalation for a resistant command.
+  session.stopTimer = setTimeout(() => {
+    session.stopTimer = null
+    if (session.running && session.child === child) signal("SIGKILL")
+  }, TERMINAL_STOP_GRACE_MS)
+  session.stopTimer.unref()
+  return true
 }
 
 const authenticated = req => {
@@ -443,10 +541,10 @@ const server = http.createServer(async (req, res) => {
     }
     const url = new URL(req.url || "/", `http://${req.headers.host || `${HOST}:${PORT}`}`)
     if (req.method === "GET" && url.pathname === "/healthz") {
-      return sendJson(req, res, 200, { status: "ok", service: "ai-memory-workspace-runtime", version: "1.0.0", workspaces: workspaces.size, terminal: true, picker: true })
+      return sendJson(req, res, 200, { status: "ok", service: "ai-memory-workspace-runtime", version: "1.0.0", workspaces: workspaces.size, terminal: true, ...ptyCapabilities(), picker: true })
     }
     if (req.method === "POST" && url.pathname === "/api/v1/runtime/pair") {
-      return sendJson(req, res, 200, { token: runtimeToken, runtime: { version: "1.0.0", host: HOST, port: PORT, terminal: true, picker: true } })
+      return sendJson(req, res, 200, { token: runtimeToken, runtime: { version: "1.0.0", host: HOST, port: PORT, terminal: true, ...ptyCapabilities(), picker: true } })
     }
     if (!authenticated(req)) throw failure("workspace runtime authorization required", 401, "UNAUTHORIZED")
 
@@ -473,6 +571,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && suffix === "") return sendJson(req, res, 200, { workspace: { ...workspace, git: gitInfo(workspace) } })
     if (req.method === "DELETE" && suffix === "") {
+      ptyManager?.removeWorkspace(workspace.id)
+      for (const session of terminals.values()) {
+        if (session.workspaceId === workspace.id && session.running && !stopTerminal(session)) {
+          throw failure("could not stop workspace terminal", 409, "TERMINAL_STOP_FAILED")
+        }
+      }
       workspaces.delete(workspace.id)
       terminalCwds.delete(workspace.id)
       await persistRegistry()
@@ -518,6 +622,48 @@ const server = http.createServer(async (req, res) => {
       else await fsp.unlink(target)
       return sendJson(req, res, 200, { removed: true })
     }
+    if (suffix === "/terminal/context" && req.method === "GET") {
+      const requested = Number.parseInt(url.searchParams.get("maxChars") || "131072", 10)
+      const maxChars = Number.isFinite(requested) ? Math.max(8192, Math.min(262144, requested)) : 131072
+      return sendJson(req, res, 200, { terminal: await terminalContextFor(workspace, maxChars) })
+    }
+    const ptyMatch = suffix.match(/^\/terminal\/pty(?:\/([^/]+)(?:\/(input|resize))?)?$/)
+    if (ptyMatch) {
+      if (!ptyManager) throw failure("native PTY unavailable; reinstall runtime dependencies", 503, "PTY_UNAVAILABLE")
+      const id = ptyMatch[1]
+      const action = ptyMatch[2]
+      if (!id && req.method === "GET") return sendJson(req, res, 200, { sessions: ptyManager.list(workspace.id) })
+      if (!id && req.method === "POST") {
+        const result = ptyManager.create(workspace, await readPtyJson(req))
+        return sendJson(req, res, result.created ? 201 : 200, { session: result.session })
+      }
+      if (id && !action && req.method === "GET") {
+        const cursor = terminalCursor(url.searchParams.get("cursor") ?? 0)
+        const waitMs = Number(url.searchParams.get("waitMs") ?? PTY_POLL_MAX_MS)
+        if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > PTY_POLL_MAX_MS) throw failure("invalid terminal poll wait", 400, "INVALID_TERMINAL_WAIT")
+        const controller = new AbortController()
+        const abort = () => controller.abort()
+        req.once("aborted", abort)
+        res.once("close", abort)
+        try {
+          const session = await ptyManager.read(workspace.id, id, cursor, { signal: controller.signal, waitMs })
+          if (!res.destroyed) return sendJson(req, res, 200, { session })
+          return
+        } finally {
+          req.off("aborted", abort)
+          res.off("close", abort)
+        }
+      }
+      if (id && !action && req.method === "DELETE") return sendJson(req, res, 200, ptyManager.remove(workspace.id, id))
+      if (id && action === "input" && req.method === "POST") {
+        const body = await readPtyJson(req)
+        return sendJson(req, res, 200, { session: ptyManager.input(workspace.id, id, body.data) })
+      }
+      if (id && action === "resize" && req.method === "POST") {
+        const body = await readPtyJson(req)
+        return sendJson(req, res, 200, { session: ptyManager.resize(workspace.id, id, body.cols, body.rows) })
+      }
+    }
     if (suffix === "/terminal/commands" && req.method === "POST") {
       const body = await readJson(req)
       const session = await startTerminalCommand(workspace, body.command)
@@ -537,6 +683,7 @@ const server = http.createServer(async (req, res) => {
 
     throw failure("not found", 404, "NOT_FOUND")
   } catch (error) {
+    if (res.destroyed || res.writableEnded) return
     const status = Number(error?.status || 500)
     const expose = error?.expose || status < 500
     sendJson(req, res, status, { error: expose ? error.message || String(error) : "workspace runtime failed", code: error?.code || "WORKSPACE_RUNTIME_FAILED" })
@@ -549,8 +696,10 @@ server.listen(PORT, HOST, () => {
 })
 
 const shutdown = () => {
+  ptyManager?.dispose()
   for (const session of terminals.values()) stopTerminal(session)
-  server.close(() => process.exit(0))
+  // Let stop escalation and child close handlers finish before exiting.
+  server.close()
   setTimeout(() => process.exit(0), 2000).unref()
 }
 

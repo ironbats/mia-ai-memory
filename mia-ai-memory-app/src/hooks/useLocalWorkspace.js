@@ -190,6 +190,7 @@ export default function useLocalWorkspace() {
   const [projectRegistryPersistent, setProjectRegistryPersistent] = useState(true)
   const [workspaceBusy, setWorkspaceBusy] = useState(false)
   const [runtimeAvailable, setRuntimeAvailable] = useState(false)
+  const [runtimePty, setRuntimePty] = useState({ available: false, reason: "" })
   const [runtimeGitChanges, setRuntimeGitChanges] = useState([])
   const [lastRefreshAt, setLastRefreshAt] = useState(0)
   const supported = directAccessSupported || portableAccessSupported || runtimeAvailable
@@ -211,7 +212,11 @@ export default function useLocalWorkspace() {
     let timer = null
     const probe = async () => {
       const health = await workspaceRuntime.health()
-      if (!cancelled) setRuntimeAvailable(Boolean(health.available))
+      if (!cancelled) {
+        setRuntimeAvailable(Boolean(health.available))
+        // Keep a known PTY surface mounted during a network outage so it can reconnect.
+        if (health.available) setRuntimePty({ available: Boolean(health.pty), reason: health.ptyReason || "" })
+      }
       if (!cancelled) timer = window.setTimeout(probe, health.available ? 10000 : 4000)
     }
     probe()
@@ -1342,13 +1347,18 @@ export default function useLocalWorkspace() {
     setContextPaths(values => values.includes(normalized) ? values.filter(item => item !== normalized) : [...values, normalized].slice(-MAX_CONTEXT_FILES))
   }, [])
 
-  const buildAgentContext = useCallback(async prompt => runWorkspaceOperation(async () => {
+  const buildAgentContext = useCallback(async request => runWorkspaceOperation(async () => {
     if (!rootHandle) return null
     const expectedProjectId = activeProjectId || activeProjectIdRef.current
     if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou antes da preparação do contexto. Envie a solicitação novamente no projeto selecionado.")
     await saveAll()
     if (expectedProjectId && activeProjectIdRef.current !== expectedProjectId) throw new Error("O projeto ativo mudou durante a preparação do contexto. Envie a solicitação novamente no projeto selecionado.")
-    const tokens = tokenize(prompt)
+    const options = typeof request === "string" ? { prompt: request } : request || {}
+    const prompt = String(options.prompt || "")
+    const conversationContext = String(options.conversation || "")
+    const contextQuery = `${prompt}\n${conversationContext}`.trim()
+    const queryLower = contextQuery.toLowerCase()
+    const tokens = tokenize(contextQuery)
     const priority = []
     const add = path => {
       const normalized = normalizePath(path)
@@ -1358,10 +1368,28 @@ export default function useLocalWorkspace() {
     for (const tab of tabsRef.current) add(tab.path)
     for (const path of contextPaths) add(path)
 
+    for (const path of filePaths) {
+      const lower = path.toLowerCase()
+      const name = basename(path).toLowerCase()
+      const stem = name.replace(/\.[^.]+$/, "")
+      if (queryLower.includes(lower) || (name.length >= 3 && queryLower.includes(name)) || (stem.length >= 4 && queryLower.includes(stem))) add(path)
+    }
+    for (const path of filePaths) {
+      if (/^(readme(?:\.md)?|package\.json|cargo\.toml|go\.mod|pom\.xml|build\.gradle|pyproject\.toml|requirements\.txt|dockerfile)$/i.test(basename(path))) add(path)
+    }
+    for (const change of runtimeGitChanges) {
+      add(change.path)
+      add(change.sourcePath)
+    }
+
     const scored = filePaths.map(path => {
       const lower = path.toLowerCase()
       const name = basename(path).toLowerCase()
+      const stem = name.replace(/\.[^.]+$/, "")
       let score = 0
+      if (queryLower.includes(lower)) score += 120
+      if (name.length >= 3 && queryLower.includes(name)) score += 60
+      if (stem.length >= 4 && queryLower.includes(stem)) score += 25
       for (const token of tokens) {
         if (name.includes(token)) score += 6
         else if (lower.includes(token)) score += 2
@@ -1387,6 +1415,16 @@ export default function useLocalWorkspace() {
     }
 
     const agentManifestPaths = filePaths.filter(path => !isSensitivePath(path))
+    const activeProject = projectsRef.current.find(project => project.id === expectedProjectId)
+    const runtimeWorkspaceId = activeProject?.mode === "runtime" ? activeProject.runtimeWorkspaceId || "" : ""
+    let terminal = null
+    if (runtimeWorkspaceId) {
+      try {
+        const result = await workspaceRuntime.terminalContext(runtimeWorkspaceId, 131072)
+        if (result?.terminal?.transcript) terminal = result.terminal
+      } catch {
+      }
+    }
     return {
       projectId: expectedProjectId || null,
       rootName,
@@ -1401,9 +1439,10 @@ export default function useLocalWorkspace() {
       manifest: agentManifestPaths.slice(0, MAX_TREE_FILES),
       manifestTruncated: agentManifestPaths.length >= MAX_TREE_FILES,
       files,
+      terminal,
       stats: { fileCount: filePaths.length, contextFileCount: files.length, contextBytes: totalBytes }
     }
-  }), [activePath, activeProjectId, contextPaths, filePaths, gitBranch, gitDetached, gitHead, gitRepository, gitWorktree, readPath, rootHandle, rootName, runWorkspaceOperation, saveAll])
+  }), [activePath, activeProjectId, contextPaths, filePaths, gitBranch, gitDetached, gitHead, gitRepository, gitWorktree, readPath, rootHandle, rootName, runWorkspaceOperation, runtimeGitChanges, saveAll])
 
   const removePath = useCallback(async path => {
     const normalized = safeRelativePath(path)
@@ -1569,6 +1608,18 @@ export default function useLocalWorkspace() {
     return Boolean(result.stopped)
   }, [activeRuntimeWorkspaceId])
 
+  // Each callback captures the workspace ID. In-flight polls and cleanup from an
+  // old project must never be redirected into the newly selected workspace.
+  const listPtyTerminals = useCallback(options => workspaceRuntime.listPty(activeRuntimeWorkspaceId, options), [activeRuntimeWorkspaceId])
+  const createPtyTerminal = useCallback(options => {
+    if (projectTransitionRef.current || !rootHandle) return Promise.reject(new Error("Aguarde a troca de projeto antes de abrir um terminal."))
+    return workspaceRuntime.createPty(activeRuntimeWorkspaceId, options)
+  }, [activeRuntimeWorkspaceId, rootHandle])
+  const pollPtyTerminal = useCallback((id, cursor, options) => workspaceRuntime.pollPty(activeRuntimeWorkspaceId, id, cursor, options), [activeRuntimeWorkspaceId])
+  const writePtyTerminal = useCallback((id, data) => workspaceRuntime.writePty(activeRuntimeWorkspaceId, id, data), [activeRuntimeWorkspaceId])
+  const resizePtyTerminal = useCallback((id, cols, rows) => workspaceRuntime.resizePty(activeRuntimeWorkspaceId, id, cols, rows), [activeRuntimeWorkspaceId])
+  const closePtyTerminal = useCallback(id => workspaceRuntime.closePty(activeRuntimeWorkspaceId, id), [activeRuntimeWorkspaceId])
+
   const activeTab = useMemo(() => tabs.find(tab => tab.path === activePath) || null, [activePath, tabs])
   const dirtyCount = useMemo(() => tabs.filter(tab => tab.dirty).length, [tabs])
   const projectItems = useMemo(() => projects.map(project => project.id === activeProjectId ? {
@@ -1589,6 +1640,8 @@ export default function useLocalWorkspace() {
     runtimeAvailable,
     runtimeWorkspaceId: activeRuntimeWorkspaceId,
     terminalRuntimeAvailable: Boolean(runtimeAvailable && activeRuntimeWorkspaceId),
+    terminalPtyAvailable: Boolean(runtimePty.available && activeRuntimeWorkspaceId),
+    terminalPtyReason: runtimePty.reason,
     workspaceMode: activeProject?.mode || "",
     isReady: Boolean(rootHandle),
     projects: projectItems,
@@ -1642,6 +1695,12 @@ export default function useLocalWorkspace() {
     applyChangePlan,
     executeTerminalCommand,
     pollTerminalSession,
-    stopTerminalSession
+    stopTerminalSession,
+    listPtyTerminals,
+    createPtyTerminal,
+    pollPtyTerminal,
+    writePtyTerminal,
+    resizePtyTerminal,
+    closePtyTerminal
   }
 }

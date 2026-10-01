@@ -5,6 +5,7 @@ import ResizeHandle from "./layout/ResizeHandle.jsx"
 import useStoredPreference from "../hooks/useStoredPreference.js"
 import useElementSize from "../hooks/useElementSize.js"
 import MessageContent from "./MessageContent.jsx"
+import SkillManager from "./SkillManager.jsx"
 
 const formatWhen = value => value ? new Date(value).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "agora"
 const formatSize = value => {
@@ -36,10 +37,34 @@ const memoryLabel = message => {
   const prior = message.memoryContext?.priorChat?.length || 0
   const attached = message.memoryContext?.attachments?.length || 0
   const code = message.memoryContext?.workspace?.contextFileCount || 0
-  return `${durable} memórias · ${prior} chats · ${attached} anexos${code ? ` · ${code} arquivos` : ""}`
+  const skills = message.memoryContext?.skills?.length || 0
+  return `${durable} memórias · ${prior} chats · ${attached} anexos${code ? ` · ${code} arquivos` : ""}${skills ? ` · ${skills} skills` : ""}`
 }
 
+const contextFromMessages = messages => messages.slice(-10).map(message => {
+  const role = message.role === "assistant" ? "ASSISTANT" : "USER"
+  return `${role}: ${String(message.content || "").slice(0, 12000)}`
+}).join("\n\n").slice(-60000)
+
 const planStatus = message => message.metadata?.codeChangeResult?.status || message.metadata?.codeChangePlan?.status || "proposed"
+const sleep = ms => new Promise(resolve => window.setTimeout(resolve, ms))
+const CHAT_EXECUTION_POLL_MS = 1400
+const CHAT_EXECUTION_RECONNECT_MAX_MS = 10000
+
+const executionLabel = message => {
+  const metadata = message?.metadata || {}
+  const phase = metadata.executionPhase || "running"
+  const attempt = Number(metadata.executionAttempt || 0)
+  const maxAttempts = Number(metadata.executionMaxAttempts || 0)
+  if (phase === "retrying") {
+    const nextAttempt = maxAttempts ? Math.min(maxAttempts, Math.max(1, attempt + 1)) : Math.max(1, attempt + 1)
+    return `Conexão renovada automaticamente · nova tentativa ${nextAttempt}${maxAttempts ? `/${maxAttempts}` : ""}`
+  }
+  if (phase === "queued") return "Execução iniciada no servidor · você não precisa enviar “continuar”"
+  if (phase === "requesting") return `Agente executando${attempt ? ` · tentativa ${attempt}${maxAttempts ? `/${maxAttempts}` : ""}` : ""}`
+  if (phase === "polling") return "Agente trabalhando · acompanhando execução remota"
+  return "Agente trabalhando em segundo plano"
+}
 
 const CHAT_ZOOM_STEPS = [100, 110, 120, 130, 140]
 const CHAT_DEFAULT_ZOOM = 120
@@ -74,7 +99,7 @@ const buildChatMetrics = zoom => {
 
 
 export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, ideLayout = "split", onIDELayoutChange, onOpenIDE, onCloseIDE }) {
-  const [bootstrap, setBootstrap] = useState({ agents: [], models: [], conversations: [] })
+  const [bootstrap, setBootstrap] = useState({ agents: [], models: [], conversations: [], skills: [] })
   const [chatZoom, setChatZoom] = useState(loadChatZoom)
   const [sidebarHidden, setSidebarHidden] = useStoredPreference("ai-memory.chat.sidebarHidden", false)
   const [preferredSidebarWidth, setSidebarWidth] = useStoredPreference("ai-memory.chat.sidebarWidth", 220)
@@ -101,14 +126,21 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   const [applyingId, setApplyingId] = useState("")
   const [downloadingId, setDownloadingId] = useState("")
   const [transferStatus, setTransferStatus] = useState("")
+  const [executionStatus, setExecutionStatus] = useState("")
   const [codeNotice, setCodeNotice] = useState("")
+  const [skillsOpen, setSkillsOpen] = useState(false)
   const fileInputRef = useRef(null)
   const composerRef = useRef(null)
   const threadEndRef = useRef(null)
+  const activeIdRef = useRef("")
+  const mountedRef = useRef(true)
+  const recoveryRef = useRef("")
 
   const agents = bootstrap.agents || []
   const models = bootstrap.models || []
   const conversations = bootstrap.conversations || []
+  const skills = bootstrap.skills || []
+  const activeSkills = skills.filter(skill => skill.enabled)
   const filteredConversations = conversations.filter(item => `${item.title} ${item.lastAgentName || ""}`.toLowerCase().includes(conversationQuery.toLowerCase().trim()))
   const selectedAgent = agents.find(item => item.id === agentId) || null
   const selectedModels = useMemo(() => models.filter(item => item.agentId === agentId), [models, agentId])
@@ -146,6 +178,17 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     return data
   }, [scopeKey])
 
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
+
   const loadConversation = useCallback(async id => {
     if (!scope || !id) {
       setConversation(null)
@@ -169,7 +212,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
   }, [scopeKey, agents])
 
   useEffect(() => {
-    setBootstrap({ agents: [], models: [], conversations: [] })
+    setBootstrap({ agents: [], models: [], conversations: [], skills: [] })
     setActiveId("")
     setConversation(null)
     setMessages([])
@@ -179,7 +222,11 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     setError("")
     setDownloadingId("")
     setTransferStatus("")
+    setExecutionStatus("")
     setCodeNotice("")
+    activeIdRef.current = ""
+    recoveryRef.current = ""
+    setSkillsOpen(false)
     if (scope) refreshBootstrap().catch(err => setError(err.message))
   }, [scopeKey, refreshBootstrap])
 
@@ -235,6 +282,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     setConversation(created)
     setMessages([])
     setActiveId(created.id)
+    activeIdRef.current = created.id
     await refreshBootstrap(created.id)
     return created
   }
@@ -295,6 +343,38 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     })
   }
 
+  const waitForAssistantCompletion = async (conversationId, messageId) => {
+    let failures = 0
+    while (mountedRef.current && activeIdRef.current === conversationId) {
+      const delay = failures ? Math.min(CHAT_EXECUTION_RECONNECT_MAX_MS, CHAT_EXECUTION_POLL_MS * (2 ** Math.min(failures, 3))) : CHAT_EXECUTION_POLL_MS
+      await sleep(delay)
+      if (!mountedRef.current || activeIdRef.current !== conversationId) return null
+      try {
+        const data = await api.chatMessage(conversationId, messageId)
+        if (!mountedRef.current || activeIdRef.current !== conversationId) return null
+        const message = data.message
+        if (!message) {
+          failures += 1
+          setExecutionStatus("Sincronizando execução com o servidor…")
+          continue
+        }
+        setMessages(current => current.some(item => item.id === message.id)
+          ? current.map(item => item.id === message.id ? message : item)
+          : [...current, message])
+        failures = 0
+        if (message.status !== "running") {
+          setExecutionStatus("")
+          return message
+        }
+        setExecutionStatus(executionLabel(message))
+      } catch {
+        failures += 1
+        setExecutionStatus("Conexão com o chat interrompida · reconectando automaticamente…")
+      }
+    }
+    return null
+  }
+
   const reportCodeResult = async (conversationId, messageId, result) => {
     try {
       await api.reportChatCodeChange(conversationId, messageId, result)
@@ -347,6 +427,35 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     }
   }
 
+  useEffect(() => {
+    const running = [...messages].reverse().find(message => message.role === "assistant" && message.status === "running")
+    if (!running || sending || recoveryRef.current === running.id || !conversation?.id) return
+    recoveryRef.current = running.id
+    setSending(true)
+    setExecutionStatus(executionLabel(running))
+    ;(async () => {
+      try {
+        const completed = await waitForAssistantCompletion(conversation.id, running.id)
+        if (!mountedRef.current || !completed) return
+        if (completed.status === "failed") {
+          setError(completed.content || "A execução do agente falhou após as tentativas automáticas.")
+          return
+        }
+        const generatedPlan = completed.metadata?.codeChangePlan
+        if (workspace?.autoApply && generatedPlan && generatedPlan.workspace?.source !== "attachment") await applyCodePlan(completed, true)
+        else await refreshBootstrap(conversation.id)
+      } catch (err) {
+        if (mountedRef.current) setError(err.message || String(err))
+      } finally {
+        if (mountedRef.current) {
+          setExecutionStatus("")
+          setSending(false)
+        }
+        recoveryRef.current = ""
+      }
+    })()
+  }, [messages, conversation?.id, workspace?.autoApply])
+
   const send = async () => {
     const content = draft.trim()
     if (!content || sending) return
@@ -371,11 +480,13 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
     setSending(true)
     setError("")
     setCodeNotice("")
+    setExecutionStatus("")
     setPendingPrompt(content)
     let currentConversation = conversation
     try {
       currentConversation = currentConversation || await createConversation()
       if (!currentConversation) throw new Error("Não foi possível criar a conversa.")
+      activeIdRef.current = currentConversation.id
       const attachmentIds = []
       for (let index = 0; index < outgoingFiles.length; index += 1) {
         const file = outgoingFiles[index]
@@ -384,12 +495,26 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
         attachmentIds.push(result.attachment.id)
       }
       if (outgoingFiles.length) setTransferStatus("ZIP analisado · montando contexto para o agente")
-      const workspaceContext = workspace?.isReady && !attachmentIds.length ? await workspace.buildAgentContext(content) : null
+      const workspaceContext = workspace?.isReady && !attachmentIds.length ? await workspace.buildAgentContext({ prompt: content, conversation: contextFromMessages(messages) }) : null
       const result = await api.sendChatMessage(currentConversation.id, { content, agentId, model, attachmentIds, workspaceContext })
-      const generatedPlan = result.assistantMessage?.metadata?.codeChangePlan
-      if (workspace?.autoApply && generatedPlan && generatedPlan.workspace?.source !== "attachment") await applyCodePlan(result.assistantMessage, true)
-      else await loadConversation(currentConversation.id)
-      await refreshBootstrap(currentConversation.id)
+      const assistantId = result.assistantMessage?.id
+      if (!assistantId) throw new Error("O servidor não retornou a execução do agente.")
+      setPendingPrompt("")
+      setPendingFiles([])
+      setTransferStatus("")
+      setExecutionStatus(executionLabel(result.assistantMessage))
+      await loadConversation(currentConversation.id)
+      const completed = result.assistantMessage?.status === "running"
+        ? await waitForAssistantCompletion(currentConversation.id, assistantId)
+        : result.assistantMessage
+      if (!completed) return
+      if (completed.status === "failed") throw new Error(completed.content || "A execução do agente falhou após as tentativas automáticas.")
+      const generatedPlan = completed.metadata?.codeChangePlan
+      if (workspace?.autoApply && generatedPlan && generatedPlan.workspace?.source !== "attachment") await applyCodePlan(completed, true)
+      else {
+        await loadConversation(currentConversation.id)
+        await refreshBootstrap(currentConversation.id)
+      }
     } catch (err) {
       setError(err.message)
       const latest = currentConversation?.id ? await loadConversation(currentConversation.id).catch(() => null) : null
@@ -403,6 +528,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
       setPendingPrompt("")
       setPendingFiles([])
       setTransferStatus("")
+      setExecutionStatus("")
       setSending(false)
       window.requestAnimationFrame(() => composerRef.current?.focus())
     }
@@ -506,6 +632,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
             <div className="chat-zoom-control" aria-label="Escala visual do chat"><button onClick={() => changeChatZoom(-1)} disabled={chatZoom === CHAT_ZOOM_STEPS[0]} title="Diminuir escala do chat">−</button><button className="chat-zoom-value" onClick={() => setChatZoom(CHAT_DEFAULT_ZOOM)} title="Restaurar escala recomendada">{chatZoom}%</button><button onClick={() => changeChatZoom(1)} disabled={chatZoom === CHAT_ZOOM_STEPS[CHAT_ZOOM_STEPS.length - 1]} title="Aumentar escala do chat">+</button></div>
             <button className={`chat-ide-button${ideOpen ? " active" : ""}`} onClick={ideOpen ? onCloseIDE : onOpenIDE}><span>&lt;/&gt;</span>{workspace?.isReady ? workspace.rootName : "Abrir IDE"}</button>
             {ideOpen ? <button className="chat-ide-resize" onClick={cycleIDELayout} title="Alternar tamanho da IDE">{ideLayout === "compact" ? "▯" : ideLayout === "wide" ? "▰" : "◫"}</button> : null}
+            <button className={`chat-skills-button${activeSkills.length ? " active" : ""}`} onClick={() => setSkillsOpen(true)} title="Adicionar e gerenciar Skills Markdown persistentes"><span>◇</span>Adicionar Skills{activeSkills.length ? <i>{activeSkills.length}</i> : null}</button>
             {workspace?.isReady ? <button className={`chat-auto-apply${workspace.autoApply ? " active" : ""}`} onClick={() => workspace.setAutoApply(!workspace.autoApply)} title={workspace.workspaceMode === "portable" ? "Quando ativo, planos sem conflito são aplicados na cópia Browser Workspace. A pasta física original não é alterada." : "Quando ativo, planos de código sem conflito são gravados automaticamente no projeto físico conectado."}><i />Auto apply</button> : null}
             {!selectedAgent?.credentialReady && ["api-key", "hybrid"].includes(selectedAgent?.connectionType) ? <button className="chat-config-warning" onClick={onConfigure}>Cadastrar chave</button> : <span className="chat-ready"><i />memória contínua</span>}
             <button className="secondary-button compact" onClick={exportConversation} disabled={!conversation || sending}>Exportar ZIP</button>
@@ -515,11 +642,12 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
         <div className="chat-status-stack">
           <div className="chat-continuity">
             <div className="chat-continuity-route"><span className="route-agent">{(selectedAgent?.name || "AI").slice(0, 2).toUpperCase()}</span><i /><span className="route-memory">M</span>{workspace?.isReady ? <><i /><span className="route-code">&lt;/&gt;</span></> : null}</div>
-            <div><strong>{workspace?.isReady ? `Memória + código · ${workspace.rootName}${gitLabel ? ` · ${gitLabel}` : ""}` : "Memória compartilhada ativa"}</strong><span>{workspace?.isReady ? `${workspace.filePaths.length} arquivos locais · ${workspace.contextPaths.length} fixados · ${continuityDetail}` : continuityDetail}</span></div>
+            <div><strong>{workspace?.isReady ? `Memória + código · ${workspace.rootName}${gitLabel ? ` · ${gitLabel}` : ""}` : "Memória compartilhada ativa"}</strong><span>{workspace?.isReady ? `${workspace.filePaths.length} arquivos locais · ${workspace.contextPaths.length} fixados · ${activeSkills.length} skills ativos · ${continuityDetail}` : `${activeSkills.length} skills ativos · ${continuityDetail}`}</span></div>
             <b>{selectedAgent?.name || "selecione um agente"}</b>
           </div>
           {codeNotice ? <div className="chat-code-notice"><span>✓</span>{codeNotice}<button onClick={onOpenIDE}>Ver na IDE</button></div> : null}
           {transferStatus ? <div className="chat-transfer-status"><span className="chat-transfer-spinner" /><strong>{transferStatus}</strong><small>O ZIP é convertido em contexto seguro para qualquer agente.</small></div> : null}
+          {executionStatus ? <div className="chat-transfer-status execution"><span className="chat-transfer-spinner" /><strong>{executionStatus}</strong><small>A execução continua no servidor e o chat reconecta sozinho em caso de interrupção.</small></div> : null}
           {error ? <div className="chat-error"><span>{error}</span>{error.includes("credencial") || error.includes("API key") || error.includes("repositoryUrl") ? <button onClick={onConfigure}>Abrir configuração</button> : error.includes("pasta") || error.includes("workspace") || error.includes("Conflito") ? <button onClick={onOpenIDE}>Abrir IDE</button> : null}</div> : null}
         </div>
 
@@ -599,6 +727,7 @@ export default function ChatWorkspace({ scope, onConfigure, workspace, ideOpen, 
           <div className="chat-composer-meta"><span>Enter envia · Shift+Enter quebra linha · Ctrl+S salva na IDE · arraste ZIPs aqui</span><strong>{selectedAgent?.name || "sem agente"} / {model || "sem modelo"}</strong></div>
         </div>
       </div>
+      {skillsOpen ? <SkillManager scope={scope} skills={skills} onClose={() => setSkillsOpen(false)} onChanged={() => refreshBootstrap(activeId)} /> : null}
     </section>
   )
 }

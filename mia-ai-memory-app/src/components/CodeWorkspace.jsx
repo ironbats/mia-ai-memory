@@ -152,6 +152,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const [cursor, setCursor] = useState({ line: 1, column: 1, offset: 0 })
   const [dialog, setDialog] = useState(null)
   const [workbenchPanel, setWorkbenchPanel] = useState("")
+  const [workbenchMaximized, setWorkbenchMaximized] = useState(false)
   const [portableImportOpen, setPortableImportOpen] = useState(false)
   const [portableImportBusy, setPortableImportBusy] = useState(false)
   const [portableImportError, setPortableImportError] = useState("")
@@ -233,7 +234,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
   const openSearch = () => { setExplorerHidden(false); setSidebarMode("search") }
   const requestFind = (replace = false) => { if (active) setEditorRequest({ replace, nonce: Date.now() }) }
   const requestGoToLine = () => { if (active) setDialog({ type: "go-line", title: "Ir para linha", description: `Informe linha ou linha:coluna (1–${lines}).`, confirmLabel: "Ir", value: String(cursor.line) }) }
-  const resetView = () => { setExplorerWidth(264); setWorkbenchHeight(260); setExplorerHidden(false); setIdeZoom(IDE_DEFAULT_ZOOM); onLayoutChange("split") }
+  const resetView = () => { setExplorerWidth(264); setWorkbenchHeight(260); setWorkbenchMaximized(false); setExplorerHidden(false); setIdeZoom(IDE_DEFAULT_ZOOM); onLayoutChange("split") }
   const revealInExplorer = () => {
     if (!active) return
     setExplorerHidden(false)
@@ -746,6 +747,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
 
       const shortcut = resolveIdeZoomShortcut(event) || resolveIdeShortcut(event)
       if (!shortcut) return
+      if (event.target?.closest(".ide-terminal-panel") && !["terminal", "panel", "command-palette", "zoom-in", "zoom-out", "zoom-reset"].includes(shortcut)) return
       if (["find", "replace", "go-line", "format-document", "go-definition", "go-implementation", "close-editor"].includes(shortcut) && !active) return
 
       event.preventDefault()
@@ -1000,7 +1002,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
 
           {explorerVisible && !narrowExplorer ? <ResizeHandle className="ide-explorer-divider" label="Largura do explorador" controls="ide-explorer-pane" value={explorerWidth} min={160} max={explorerMax} onChange={setExplorerWidth} onReset={() => setExplorerWidth(264)} /> : null}
 
-          <div ref={editorColumnRef} className={`ide-editor-column${workbenchPanel ? " panel-open" : ""}`}>
+          <div ref={editorColumnRef} className={`ide-editor-column${workbenchPanel ? " panel-open" : ""}${workbenchPanel && workbenchMaximized ? " panel-maximized" : ""}`}>
             <div className="ide-tabs">
               {workspace.tabs.map(tab => {
                 const badge = fileBadge(tab.path)
@@ -1022,7 +1024,7 @@ export default function CodeWorkspace({ workspace, layout = "split", onLayoutCha
               </div>
             </div>
             {active ? <SyntaxEditor key={`${workspace.workspaceSession}:${active.path}`} searchRequest={editorRequest} value={active.content} language={active.language} path={active.path} onChange={content => workspace.updateContent(active.path, content)} onSave={() => workspace.saveFile(active.path).catch(error => setLocalError(error.message || String(error)))} onCursorChange={setCursor} onNavigate={runSymbolNavigation} revealLine={revealLine} fontSize={14 * ideZoom / 100} /> : <div className="ide-editor-empty"><span>&lt;/&gt;</span><strong>Escolha um arquivo para começar</strong><p>Git, Terminal, Outline e Problems permanecem acessiveis pela barra de atividades mesmo sem um arquivo aberto.</p></div>}
-            {workbenchPanel ? <IdeWorkbenchPanel activePanel={workbenchPanel} onPanelChange={setWorkbenchPanel} onClose={closePanel} workspace={workspace} analysis={analysis} onRevealLine={revealActiveLine} resizeHandle={<ResizeHandle className="ide-workbench-divider" orientation="horizontal" reverse label="Altura do painel inferior" value={workbenchHeight} min={110} max={workbenchMax} onChange={setWorkbenchHeight} onReset={() => setWorkbenchHeight(260)} />} /> : null}
+            <IdeWorkbenchPanel activePanel={visible ? workbenchPanel : ""} onPanelChange={setWorkbenchPanel} onClose={closePanel} maximized={workbenchMaximized} onToggleMaximize={() => setWorkbenchMaximized(value => !value)} workspace={workspace} analysis={analysis} onRevealLine={revealActiveLine} resizeHandle={<ResizeHandle className="ide-workbench-divider" orientation="horizontal" reverse label="Altura do painel inferior" value={workbenchHeight} min={110} max={workbenchMax} onChange={setWorkbenchHeight} onReset={() => setWorkbenchHeight(260)} />} />
             <footer className="ide-statusbar">
               <button className="status-git" onClick={() => openPanel("changes")} title={workspace.gitHead ? `HEAD ${workspace.gitHead}` : "Git"}>{workspace.gitRepository ? `⑂ ${workspace.gitBranch || workspace.gitHeadShort || "Git"}` : "sem Git"}</button>
               {active ? <span className={active.dirty ? "status-dirty" : "status-saved"}>{active.dirty ? "● Modificado" : "✓ Salvo"}</span> : <span className="status-saved">✓ Workspace ativo</span>}

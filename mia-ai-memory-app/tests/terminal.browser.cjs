@@ -1,0 +1,38 @@
+const { chromium } = require('playwright')
+const { spawn } = require('node:child_process')
+const assert = require('node:assert/strict')
+const { setTimeout: delay } = require('node:timers/promises')
+;(async () => {
+  const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '5199', '--strictPort'], { stdio: 'ignore' })
+  let browser
+  try {
+    for (let i = 0; i < 100; i++) { try { if ((await fetch('http://127.0.0.1:5199')).ok) break } catch {} await delay(50) }
+    browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}) })
+    const page = await browser.newPage({ viewport: { width: 1000, height: 650 } })
+    const errors = []; page.on('pageerror', error => errors.push(error.message))
+    await page.goto('http://127.0.0.1:5199/tests/fixtures/terminal.html')
+    const input = page.getByRole('textbox', { name: 'Comando do terminal' })
+    const run = async text => { await input.fill(text); await input.press('Enter') }
+    const output = page.getByLabel('Saída do terminal')
+    await run('hello'); await page.waitForFunction(() => document.querySelector('.ide-terminal-output').textContent.includes('alpha: hello'))
+    await input.fill('draft'); await input.press('ArrowUp'); assert.equal(await input.inputValue(), 'hello'); await input.press('ArrowDown'); assert.equal(await input.inputValue(), 'draft')
+    await page.getByRole('button', { name: 'Novo terminal', exact: true }).click()
+    assert.equal(await page.getByRole('tab').count(), 2)
+    await run('long'); assert.equal(await page.getByRole('button', { name: 'Fechar terminal', exact: true }).isDisabled(), true)
+    await page.getByRole('button', { name: 'Mostrar / ocultar' }).click(); assert.equal(await input.isVisible(), false)
+    await page.getByRole('button', { name: 'Mostrar / ocultar' }).click(); assert.match(await output.textContent(), /running/)
+    await page.getByRole('button', { name: 'Trocar projeto' }).click(); assert.equal(await page.getByRole('tab').count(), 1); assert.doesNotMatch(await output.textContent(), /running/)
+    await run('delayed'); await page.getByRole('button', { name: 'Trocar projeto' }).click(); await delay(500); assert.doesNotMatch(await output.textContent(), /beta: delayed/)
+    await page.getByRole('button', { name: 'Parar processo', exact: true }).click(); await page.waitForFunction(() => !document.querySelector('[aria-label="Fechar terminal"]').disabled)
+    await input.press('Control+l'); assert.doesNotMatch(await output.textContent(), /running/)
+    await page.getByRole('button', { name: 'Transição', exact: true }).click(); assert.equal(await input.getAttribute('readonly'), ''); assert.equal(await page.getByRole('button', { name: 'Executar comando' }).isDisabled(), true)
+    await page.getByRole('button', { name: 'Transição', exact: true }).click()
+    await run('git status'); await page.waitForFunction(() => document.querySelector('.ide-terminal-output').textContent.includes('alpha: git status'))
+    const panelHeight = await page.locator('.command-console').evaluate(node => node.getBoundingClientRect().height)
+    assert.ok(panelHeight > 150, `Terminal height was ${panelHeight}`)
+    await page.screenshot({ path: process.env.TERMINAL_SCREENSHOT || '/tmp/ai-memory-terminal-desktop.png', fullPage: true })
+    await page.setViewportSize({ width: 390, height: 650 }); await page.screenshot({ path: '/tmp/ai-memory-terminal-mobile.png', fullPage: true })
+    assert.deepEqual(errors, [])
+    console.log('PASS: StrictMode UI, history draft, tabs, close/reopen, project isolation during POST, stop, clear, transition lock, desktop/mobile rendering; no page errors')
+  } finally { await browser?.close(); server.kill('SIGTERM') }
+})().catch(error => { console.error(error); process.exitCode = 1 })

@@ -88,3 +88,14 @@ export const formatUnifiedDiff = change => {
   const body = diff.rows.map(row => `${row.type === "add" ? "+" : row.type === "delete" ? "-" : " "}${row.text}`).join("\n")
   return `--- ${headerBefore}\n+++ ${headerAfter}\n${body}`
 }
+
+export const changeStatusLetter = change => {
+  if (!change) return "M"
+  if (change.gitStatus) {
+    const value = String(change.gitStatus).trim()
+    return value === "??" ? "A" : value.includes("D") ? "D" : "M"
+  }
+  if (!change.beforeExists && change.afterExists) return "A"
+  if (change.beforeExists && !change.afterExists) return "D"
+  return "M"
+}

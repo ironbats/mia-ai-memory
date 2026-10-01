@@ -315,3 +315,10 @@ main.workspace-layout.developer-mode.ide-wide .persistent-chat-column .chat-work
   .app-shell.workspace-maximized main.workspace-layout.developer-mode .persistent-chat-column { grid-column: 1; grid-row: 2; }
   .app-shell.workspace-maximized main.workspace-layout.developer-mode .workspace-main-resizer { display: none; }
 }
+
+/* Maximize the workbench without unmounting the editor or terminal session. */
+.code-workspace .ide-editor-column { position: relative; }
+.code-workspace .ide-editor-column.panel-maximized > .ide-workbench { position: absolute; inset: 0; z-index: 5; }
+.code-workspace .ide-editor-column.panel-maximized > :not(.ide-workbench) { visibility: hidden; }
+.code-workspace .ide-editor-column.panel-maximized .ide-workbench-divider { display: none; }
+.ide-workbench-tabs .ide-workbench-maximize { width: 30px; padding: 0; font-size: 19px; }

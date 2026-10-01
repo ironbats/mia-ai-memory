@@ -36,6 +36,24 @@ const limitedText = (value, max, name) => {
   return text
 }
 
+const limitedUtf8Tail = (value, maxBytes) => {
+  const buffer = Buffer.from(String(value ?? ""), "utf8")
+  if (buffer.length <= maxBytes) return buffer.toString("utf8")
+  let start = buffer.length - maxBytes
+  while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start += 1
+  return buffer.subarray(start).toString("utf8")
+}
+
+const sanitizeTerminalText = value => String(value || "")
+  .replace(/[\u001b\u009b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g, "")
+  .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|passwd|secret|token|cookie)\s*(?:=|:)\s*)([^\s]+)/gi, "$1[REDACTED]")
+  .replace(/((?:--)?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|password|passwd|secret|token)\s+)([^\s]+)/gi, "$1[REDACTED]")
+  .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]")
+  .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[REDACTED]")
+  .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED]")
+  .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[REDACTED]")
+  .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{12,}={0,2}/gi, "$1[REDACTED]")
+
 export const normalizeWorkspaceContext = input => {
   if (!input || typeof input !== "object") return null
   const rootName = limitedText(input.rootName, 180, "workspace root name").trim()
@@ -96,6 +114,17 @@ export const normalizeWorkspaceContext = input => {
     worktree: rawGit.worktree === true
   } : null
 
+  const rawTerminal = input.terminal && typeof input.terminal === "object" ? input.terminal : null
+  const sanitizedTerminalTranscript = sanitizeTerminalText(rawTerminal?.transcript || "")
+  const terminalTranscript = limitedUtf8Tail(sanitizedTerminalTranscript, config.chatWorkspaceTerminalMaxBytes).trim()
+  const rawSessionCount = Number(rawTerminal?.sessionCount || 0)
+  const terminal = terminalTranscript ? {
+    transcript: terminalTranscript,
+    sessionCount: Number.isFinite(rawSessionCount) ? Math.max(0, Math.min(32, Math.floor(rawSessionCount))) : 0,
+    truncated: rawTerminal?.truncated === true || Buffer.byteLength(sanitizedTerminalTranscript, "utf8") > config.chatWorkspaceTerminalMaxBytes,
+    capturedAt: String(rawTerminal?.capturedAt || "").slice(0, 80) || null
+  } : null
+
   return {
     source: "local",
     sourceAttachmentId: null,
@@ -106,6 +135,7 @@ export const normalizeWorkspaceContext = input => {
     rootName,
     activeFile,
     git,
+    terminal,
     manifest,
     manifestTruncated: input.manifestTruncated === true,
     files,
@@ -124,6 +154,9 @@ export const workspacePromptSection = workspace => {
     ? workspace.files.map(file => `FILE ${file.path}\nSHA256 ${file.sha256 || "unknown"}\nLANGUAGE ${file.language || "unknown"}\n${file.content}`).join("\n\n")
     : "No source file contents were selected for this turn."
   const attachment = workspace.source === "attachment"
+  const terminal = !attachment && workspace.terminal?.transcript
+    ? `Recent terminal transcript${workspace.terminal.truncated ? " (bounded tail)" : ""} from ${workspace.terminal.sessionCount || 1} session(s):\n${workspace.terminal.transcript}`
+    : "No recent terminal transcript was supplied for this turn."
   return [
     `${attachment ? "ATTACHED ZIP WORKSPACE" : "LOCAL WORKSPACE"} ${workspace.rootName}`,
     ...(attachment ? [`Source attachment${workspace.sourceAttachmentNames?.length > 1 ? "s" : ""}: ${workspace.sourceAttachmentNames?.length ? workspace.sourceAttachmentNames.join(", ") : workspace.sourceAttachmentName || "ZIP attachment"}`] : [`Workspace identity: ${workspace.projectId || "legacy-local-workspace"}`, `Active file: ${workspace.activeFile || "none"}`, `Git repository: ${workspace.git ? "yes" : "no"}`]),
@@ -132,7 +165,8 @@ export const workspacePromptSection = workspace => {
     "PROJECT MANIFEST",
     manifest,
     "SOURCE CONTEXT",
-    files
+    files,
+    ...(!attachment ? ["TERMINAL CONTEXT", terminal] : [])
   ].join("\n\n")
 }
 

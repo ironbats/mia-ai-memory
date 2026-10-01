@@ -1,0 +1,93 @@
+/* One terminal surface, with toolbar and command input in the same monospace rhythm. */
+.ide-workbench[hidden], .ide-terminal-panel[hidden] { display: none; }
+.ide-terminal-panel.command-console { grid-template-rows: 32px 26px minmax(0, 1fr) 36px; }
+.ide-terminal-toolbar, .ide-terminal-tabs, .ide-terminal-actions { display: flex; min-width: 0; align-items: center; }
+.ide-terminal-toolbar { border-bottom: 1px solid #242b3a; background: #0e131c; }
+.ide-terminal-tabs { flex: 1; height: 100%; overflow-x: auto; scrollbar-width: thin; }
+.ide-terminal-tabs button, .ide-terminal-actions button, .ide-terminal-input button { flex-shrink: 0; height: 28px; border: 0; border-radius: 0; color: #a8b3c8; background: transparent; padding: 0 9px; font-size: var(--ide-font-sm); }
+.ide-terminal-tabs button[aria-selected="true"] { background: #080c12; color: #e3e8f3; box-shadow: inset 0 -2px #8174ee; }
+.ide-terminal-tabs button span { color: #83d9b5; }
+.ide-terminal-actions button { width: 30px; padding: 0; font-size: 16px; }
+.ide-terminal-actions button:disabled { opacity: .3; }
+.ide-terminal-actions button:hover:not(:disabled), .ide-terminal-input button:hover:not(:disabled) { background: #232b3a; color: #fff; }
+.ide-terminal-panel button:focus-visible, .ide-terminal-output:focus-visible { outline: 1px solid #aaa0ff; outline-offset: -2px; }
+.ide-terminal-panel .ide-terminal-mode { font-size: var(--ide-font-xs); }
+.ide-terminal-mode small { margin-left: auto; white-space: nowrap; }
+.ide-terminal-content { position: relative; min-height: 0; overflow: hidden; }
+.command-console .ide-terminal-output { height: 100%; box-sizing: border-box; overscroll-behavior: contain; scrollbar-width: thin; }
+.command-console .ide-terminal-output pre { margin: 0; color: #c5ccda; font: var(--ide-font-md)/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; tab-size: 4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.command-console .ide-terminal-output.no-wrap pre { white-space: pre; overflow-wrap: normal; word-break: normal; }
+.ide-terminal-output .terminal-command { color: #bdb4ff; }
+.ide-terminal-output .terminal-error { color: #ff93a5; }
+.ide-terminal-output .terminal-success { color: #85d8b5; }
+.ide-terminal-output .terminal-system, .ide-terminal-welcome { color: #8793a9; }
+.ide-terminal-welcome { font: var(--ide-font-sm)/1.5 ui-monospace, monospace; padding-bottom: 8px; }
+.ide-terminal-follow { position: absolute; right: 12px; bottom: 8px; border: 1px solid #625890; border-radius: 4px; background: #252039; color: #eeeaff; font-size: var(--ide-font-sm); padding: 4px 8px; }
+.command-console .ide-terminal-input { grid-template-columns: minmax(0, max-content) minmax(60px, 1fr) 28px; }
+.command-console .ide-terminal-input > span { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.command-console .ide-terminal-input:focus-within { box-shadow: inset 2px 0 #8174ee; }
+@media (max-width: 600px) { .command-console .ide-terminal-mode > span { display: none; } .command-console .ide-terminal-input > span { max-width: 100px; } }
+
+/* Interactive PTY: one xterm instance per tab, retained when the panel is hidden. */
+.ide-terminal-panel.pty-console { display: grid; grid-template-rows: auto 26px minmax(0, 1fr) 28px; background: #181818; color: #ccc; }
+.ide-terminal-panel.pty-console[hidden], .ide-pty-slot[hidden], .ide-pty-pane[hidden] { display: none; }
+.pty-console .ide-terminal-toolbar { min-height: 34px; background: #181818; border-bottom-color: #2b2b2b; flex-wrap: wrap; }
+.pty-console .ide-terminal-tabs { min-width: 100px; min-height: 34px; }
+.pty-console .ide-terminal-tabs button { display: flex; align-items: center; gap: 7px; height: 34px; border-right: 1px solid #2b2b2b; color: #969696; font-size: var(--ide-font-sm, 12px); }
+.pty-console .ide-terminal-tabs button[aria-selected="true"] { background: #1f1f1f; color: #fff; box-shadow: inset 0 1px #007acc; }
+.pty-console .ide-terminal-tabs button span { color: inherit; }
+.pty-console .ide-terminal-tabs button .pty-running { color: #73c991; }
+.ide-pty-tab-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pty-console .ide-terminal-tabs button i { font-style: normal; color: #f0bd71; }
+.pty-console .ide-terminal-actions { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.pty-console .ide-terminal-actions button { color: #bbb; }
+.pty-console .ide-terminal-actions button:hover:not(:disabled), .pty-console button[aria-pressed="true"] { background: #313131; }
+.pty-console button:disabled { cursor: not-allowed; opacity: .4; }
+.pty-console button:focus-visible, .pty-console input:focus-visible { outline: 1px solid #75beff; outline-offset: -2px; }
+.pty-console .ide-terminal-mode { display: flex; align-items: center; min-width: 0; padding: 0 10px; background: #1b1b1b; border-bottom: 1px solid #272727; gap: 8px; font-size: var(--ide-font-xs, 11px); }
+.pty-console .ide-terminal-mode strong { color: #8dd6b3; font-size: 10px; font-weight: 600; white-space: nowrap; }
+.pty-console .ide-terminal-mode > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #969696; }
+.pty-console .ide-terminal-mode small { color: #a8a8a8; }
+.ide-pty-content { display: grid; min-height: 0; min-width: 0; position: relative; overflow: hidden; }
+.ide-pty-content.split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.ide-pty-slot { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.ide-pty-content.split .ide-pty-slot + .ide-pty-slot { border-left: 1px solid #444; }
+.ide-pty-pane { flex: 1; min-height: 0; min-width: 0; position: relative; padding: 8px 5px 3px 12px; overflow: hidden; }
+.ide-pty-surface { width: 100%; height: 100%; min-height: 0; }
+.ide-pty-surface .xterm { height: 100%; padding: 0; }
+.ide-pty-surface .xterm-viewport { overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #4c4c4c #181818; }
+.ide-pty-surface .xterm-screen { outline: none; }
+.ide-pty-pane-title { display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; border: 0; border-bottom: 1px solid #333; background: #202020; color: #999; font: 11px ui-monospace, monospace; text-align: left; }
+.ide-pty-pane-title.active { color: #ddd; box-shadow: inset 0 1px #007acc; }
+.ide-pty-pane-title span { color: #818181; font-size: 10px; }
+.ide-pty-find, .ide-pty-rename { position: absolute; right: 14px; top: 4px; z-index: 4; display: flex; align-items: center; flex-wrap: wrap; gap: 3px; background: #252526; border: 1px solid #454545; padding: 5px; box-shadow: 0 2px 8px #0006; max-width: calc(100% - 28px); }
+.ide-pty-find input, .ide-pty-rename input { width: 190px; min-width: 80px; max-width: 100%; border: 1px solid #555; border-radius: 0; background: #3c3c3c; color: #eee; padding: 4px 6px; font-size: 12px; outline-color: #007acc; }
+.ide-pty-find > span { font-size: 10px; color: #cda; white-space: nowrap; }
+.ide-pty-find button, .ide-pty-rename button, .ide-pty-footer button { border: 0; background: transparent; color: #ccc; font-size: 12px; padding: 3px 6px; }
+.ide-pty-find button:hover:not(:disabled), .ide-pty-rename button:hover:not(:disabled), .ide-pty-footer button:hover:not(:disabled) { background: #444; }
+.ide-pty-rename label { font-size: 12px; color: #bbb; }
+.ide-pty-footer { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 10px; border-top: 1px solid #2b2b2b; background: #181818; font: 10px ui-monospace, monospace; color: #aaa; }
+.ide-pty-footer > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ide-pty-footer button { flex-shrink: 0; }
+.ide-pty-footer small { margin-left: auto; white-space: nowrap; }
+.ide-pty-footer.has-error { color: #e8b776; }
+.ide-pty-empty { align-self: center; justify-self: center; padding: 15px; text-align: center; color: #969696; max-width: 520px; font-size: 12px; }
+.ide-pty-empty > span { display: block; color: #666; font-size: 28px; margin-bottom: 12px; }
+.ide-pty-empty > strong { color: #ccc; font-weight: 500; }
+.ide-pty-empty p { line-height: 1.5; margin: 8px 0 14px; }
+.ide-pty-empty button { background: #0e639c; border: 0; color: #fff; padding: 6px 12px; border-radius: 2px; font-size: 12px; }
+.ide-pty-empty button:disabled { opacity: .5; }
+.ide-pty-render-error { position: absolute; inset: 12px; padding: 12px; overflow: auto; background: #181818; color: #e8b776; font-size: 12px; }
+.ide-pty-render-error p { overflow-wrap: anywhere; }
+.ide-pty-render-error button { padding: 5px 10px; border: 1px solid #555; background: #2d2d30; color: #eee; }
+.ide-pty-follow { position: absolute; right: 16px; bottom: 10px; z-index: 2; max-width: calc(100% - 32px); padding: 5px 10px; border: 1px solid #497697; border-radius: 3px; background: #17374d; color: #e5f4ff; font: 12px ui-sans-serif, system-ui, sans-serif; box-shadow: 0 2px 8px #0006; }
+.ide-pty-follow:hover { background: #214c69; }
+.ide-pty-paste-confirm { position: absolute; inset: 6px 12px; z-index: 6; display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow: auto; padding: 12px; border: 1px solid #666; background: #252526; color: #ddd; box-shadow: 0 4px 20px #0008; font-size: 12px; }
+.ide-pty-paste-confirm strong { font-size: 13px; }
+.ide-pty-paste-confirm p { margin: 0; line-height: 1.4; color: #d8ba88; }
+.ide-pty-paste-confirm pre { flex: 1 0 40px; max-height: 140px; overflow: auto; margin: 0; padding: 8px; background: #181818; border: 1px solid #444; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ide-pty-paste-confirm small { color: #aaa; }
+.ide-pty-paste-confirm > div { display: flex; justify-content: flex-end; gap: 8px; }
+.ide-pty-paste-confirm button { padding: 5px 10px; border: 1px solid #555; background: #333; color: #eee; font-size: 12px; }
+.ide-pty-paste-confirm button[type="submit"] { background: #0e639c; border-color: #1976b3; }
+@media (max-width: 700px) { .pty-console .ide-terminal-mode > span, .ide-pty-find > span { display: none; } .pty-console .ide-terminal-actions button { width: 27px; } .ide-pty-find input { width: 135px; } .ide-pty-content.split { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); } }

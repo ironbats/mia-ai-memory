@@ -8,6 +8,10 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js"
+    "check": "node --check src/index.js && node --check src/terminal-output.js && node --check src/pty-manager.js && node --check src/pty-native.js",
+    "test": "node --test"
+  },
+  "optionalDependencies": {
+    "node-pty": "1.1.0"
   }
 }

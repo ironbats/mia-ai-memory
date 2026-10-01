@@ -1,12 +1,14 @@
 import { promptValue } from "./dialogService.js"
 
 const request = async (path, options = {}) => {
+  const { timeoutMs, ...requestOptions } = options
   const response = await fetch(path, {
-    ...options,
+    ...requestOptions,
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     headers: {
       Accept: "application/json",
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(options.headers || {})
+      ...(requestOptions.body ? { "Content-Type": "application/json" } : {}),
+      ...(requestOptions.headers || {})
     }
   })
   const body = await response.json().catch(() => ({}))
@@ -126,11 +128,23 @@ export const api = {
   rotateCredential: (id, payload) => adminRequest(`/api/v1/cognitive/config/credentials/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteCredential: id => adminRequest(`/api/v1/cognitive/config/credentials/${encodeURIComponent(id)}`, { method: "DELETE" }),
   chatBootstrap: scope => adminRequest(`/api/v1/cognitive/chat/bootstrap?${scopeQuery(scope)}`),
+  chatSkills: scope => adminRequest(`/api/v1/cognitive/chat/skills?${scopeQuery(scope)}`),
+  uploadChatSkill: async (scope, file) => {
+    const response = await rawAdminRequest(`/api/v1/cognitive/chat/skills?${scopeQuery(scope)}&filename=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "text/markdown", Accept: "application/json" },
+      body: file
+    })
+    return response.json()
+  },
+  setChatSkillEnabled: (id, scope, enabled) => adminRequest(`/api/v1/cognitive/chat/skills/${encodeURIComponent(id)}?${scopeQuery(scope)}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
+  deleteChatSkill: (id, scope) => adminRequest(`/api/v1/cognitive/chat/skills/${encodeURIComponent(id)}?${scopeQuery(scope)}`, { method: "DELETE" }),
   chatConversation: (id, scope) => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(id)}?${scopeQuery(scope)}`),
   createChatConversation: payload => adminRequest("/api/v1/cognitive/chat/conversations", { method: "POST", body: JSON.stringify(payload) }),
   updateChatConversation: (id, payload) => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteChatConversation: id => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  sendChatMessage: (id, payload) => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(payload) }),
+  sendChatMessage: (id, payload) => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", headers: { Prefer: "respond-async" }, body: JSON.stringify(payload) }),
+  chatMessage: (conversationId, messageId) => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`, { timeoutMs: 8000 }),
   reportChatCodeChange: (conversationId, messageId, payload) => adminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/code-change-result`, { method: "POST", body: JSON.stringify(payload) }),
   exportChatCodeChange: async (conversationId, messageId, fallbackName = "solution.zip") => {
     const response = await rawAdminRequest(`/api/v1/cognitive/chat/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/code-change-export`, { headers: { Accept: "application/zip" } })

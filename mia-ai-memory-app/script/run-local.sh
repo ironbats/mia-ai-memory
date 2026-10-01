@@ -12,25 +12,18 @@ fail() {
   exit 1
 }
 
-command -v node >/dev/null 2>&1 || fail "Node.js nao encontrado. Instale Node.js 22 ou superior."
+command -v node >/dev/null 2>&1 || fail "Node.js nao encontrado. Instale Node.js 22.12+ ou 24+."
 command -v npm >/dev/null 2>&1 || fail "npm nao encontrado."
 [[ -f "$PROJECT_ROOT/package.json" ]] || fail "package.json nao encontrado em $PROJECT_ROOT"
 
-NODE_MAJOR="$(node -p "Number(process.versions.node.split('.')[0])")"
-[[ "$NODE_MAJOR" -ge 22 ]] || fail "Node.js 22 ou superior e obrigatorio. Versao atual: $(node --version)"
-
 cd "$PROJECT_ROOT"
 
-if [[ ! -x "$PROJECT_ROOT/node_modules/.bin/vite" ]]; then
-  if [[ -f "$PROJECT_ROOT/package-lock.json" ]]; then
-    npm ci --no-audit --no-fund
-  else
-    npm install --no-audit --no-fund --no-package-lock
-  fi
-fi
+# The Node-only bootstrap checks the whole locked tree, including xterm,
+# even if Vite was already installed by an older version of the app.
+node "$SCRIPT_DIR/ensure-dependencies.mjs"
 
 if command -v curl >/dev/null 2>&1; then
-  if ! curl -fsS "$COGNITIVE_API_URL/healthz" >/dev/null 2>&1; then
+  if ! curl --connect-timeout 2 --max-time 3 -fsS "$COGNITIVE_API_URL/healthz" >/dev/null 2>&1; then
     printf 'AVISO: backend nao respondeu em %s/healthz. O frontend sera iniciado mesmo assim.\n' "$COGNITIVE_API_URL" >&2
   fi
 fi
