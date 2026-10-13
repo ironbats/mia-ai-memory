@@ -28,6 +28,7 @@ export const resolveIdeShortcut = event => {
     if (key === "f") return "project-search"
     if (key === "g") return "changes"
     if (key === "m") return "problems"
+    if (key === "b") return "check-diagnostics"
     if (key === "o") return "outline"
     if (key === "s") return "save-all"
     if (key === "t") return "reopen-editor"

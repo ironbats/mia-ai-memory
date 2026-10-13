@@ -14,11 +14,11 @@ O shell inicial é Bash (ou `sh`) no Linux, Zsh/Bash no macOS e PowerShell (ou c
 
 ### HOST RW · comandos
 
-Se o runtime é antigo ou o módulo nativo não carregou, permanece a console anterior de comandos: até oito abas, histórico Up/Down, saída, stop, limpar e quebra de linha. Não recebe stdin, cada comando abre outro processo e o cwd permanece compartilhado entre as abas deste modo. O fallback não simula PTY.
+Se o runtime não disponibiliza o módulo nativo `node-pty`, a IDE utiliza o terminal alternativo: até oito abas, histórico Up/Down, saída, stop, limpar e quebra de linha. O prompt do projeto aparece na mesma área rolável que a saída, imediatamente após o último resultado, sem barra de digitação separada. Ao abrir ou selecionar o terminal, a entrada recebe o foco; `Enter` executa o comando e `Ctrl+L` limpa a saída. O diretório ativo é indicado pelo prompt. Não recebe stdin durante processos em execução, cada comando abre outro processo e o cwd permanece compartilhado entre as abas deste modo. O fallback não simula PTY. Passe para o modo PTY para executar programas interativos e manter estados do shell independentes entre abas.
 
 ### Browser · limitado
 
-Projetos sem runtime continuam com os comandos locais limitados, listados por `help`. Não executam um shell do sistema.
+Projetos sem runtime continuam com os comandos locais limitados, listados por `help`, usando a mesma disposição integrada do prompt e da saída. Não executam um shell do sistema.
 
 ## Atalhos no PTY
 
@@ -39,7 +39,7 @@ Na raiz do checkout, use Node.js 22.12+ na linha 22 ou 24+ para o frontend (test
 
 ```sh
 cd mia-ai-memory/services/workspace-runtime
-npm ci
+npm ci --include=optional
 npm run check
 npm test
 # Depois de parar o runtime que já estiver ativo:
@@ -66,7 +66,7 @@ Leia [o README](../README.md) para diagnóstico e recuperação de instalações
 
 Selecione um projeto conectado ao HOST RW e abra Terminal. O runtime anuncia `pty: true` em `/healthz` quando o módulo nativo carregou. Não é preciso migrar dados do AI Memory ou alterar configuração dos agentes.
 
-`node-pty` é uma dependência nativa opcional: se a instalação não conseguir compilar/carregar o módulo, o runtime continua em modo comandos. Linux pode exigir compilador C/C++, make e Python; macOS pode exigir Xcode Command Line Tools; Windows pode exigir ferramentas de compilação C++/SDK compatíveis. Consulte as instruções oficiais de [node-pty](https://github.com/microsoft/node-pty#dependencies) para sua plataforma. Não copie `node_modules` desta entrega entre sistemas.
+`node-pty` é uma dependência nativa opcional: se a instalação não conseguir compilar/carregar o módulo, o runtime continua em modo comandos. Linux pode exigir compilador C/C++, make e Python; macOS pode exigir Xcode Command Line Tools; Windows pode exigir ferramentas de compilação C++/SDK compatíveis. Consulte as instruções oficiais de [node-pty](https://github.com/microsoft/node-pty#dependencies) para sua plataforma. Não copie `node_modules` desta entrega entre sistemas. Se aparecer `HOST RW · comandos` no terminal, verifique a instalação de `node-pty` no runtime e reinicie o serviço. O tooltip da barra de modo explica a capacidade indisponível; a IDE não afirma que o fallback é um shell interativo.
 
 ## Segurança e lifecycle
 
@@ -113,3 +113,19 @@ jsdom verifica DOM e eventos, mas não pintura, seleção real, IME ou layout. B
 8. Editor/chat, autenticação e isolamento das rotas de workspace
 
 O smoke Browser anterior (`npm run test:browser`) continua disponível para o fallback de comandos. Não deve ser descrito como validação PTY ponta a ponta. Windows e macOS precisam de validação própria.
+
+## Cores e prompt no modo de comandos (v2.0.0.19)
+
+- O prompt do projeto (`projeto/caminho $`) é parte do fluxo de saída, não uma barra inferior independente. Continua acessível por teclado, mantém histórico, abas e ações de interrupção. A entrada fica temporariamente indisponível enquanto um comando não interativo executa.
+- O Workspace Runtime preserva somente sequências ANSI SGR (cores/ênfase) na saída dos comandos; sequências de controle OSC/CSI que alterariam cursor, título ou clipboard são removidas no fallback. O navegador transforma SGR em elementos React com texto escapado, sem renderização de HTML remoto. O transcript do agente continua sem códigos ANSI.
+- Em `git status`, arquivos *modificados e ainda não preparados para commit* e arquivos *não rastreados* aparecem em vermelho; arquivos *preparados para commit* aparecem em verde. `git diff` usa verde em linhas adicionadas e vermelho em removidas. O estágio real do Git é a fonte dessa informação; executar `git add <arquivo>` altera o status.
+- Para comandos Git diretos (`git status`, `git diff`, `git log`, `git show`), o runtime força cores apenas na execução com pipes, sem alterar a configuração global do Git. Redirecionamentos explícitos são preservados sem forçar cores. Os demais comandos continuam livres para decidir se produzem cor; somente o shell PTY garante comportamento típico de um terminal TTY.
+- O fallback continua limitado a um processo por comando: `python` interativo, `vim`, `top`, REPLs e leitura de stdin exigem o modo PTY. Não tente simular um PTY somente com estilos CSS.
+
+### Verificação manual rápida
+
+1. Abra um workspace `HOST RW`, selecione Terminal e confirme o prompt dentro da área rolável, sem campo separado no rodapé.
+2. Rode `pwd`, `git status`, `git diff` e `cd <pasta>`; confirme o diretório exibido no prompt e a saída acumulada acima dele.
+3. Modifique um arquivo rastreado, crie outro e execute `git status`; os caminhos não preparados devem ficar vermelhos. Execute `git add <arquivo>` e repita `git status`; o caminho preparado deve ficar verde.
+4. Confirme histórico `↑/↓`, várias abas, `Ctrl+C`, `Ctrl+L`, atualização do projeto, seleção/cópia de texto, rolagem e projetos diferentes.
+5. Instale `node-pty` com `npm ci --include=optional` e reinicie o runtime para validar também o shell interativo PTY.

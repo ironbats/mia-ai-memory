@@ -1,474 +1,346 @@
-import React, { useEffect, useMemo, useRef, useState } from "react"
+import React, { useCallback, useEffect, useRef, useState } from "react"
 import EditorFindBar from "./ide/EditorFindBar.jsx"
 import { getCompletions, wordPrefixAt } from "../lib/ideLanguageService.js"
+import { editorModeForLanguage, loadIdeEditorEngine } from "../lib/ideEditorEngine.js"
 
-const MAX_HIGHLIGHT_CHARS = 360000
+const MAX_VISIBLE_MATCHES = 350
 
-const commonKeywords = new Set([
-  "abstract", "as", "async", "await", "break", "case", "catch", "class", "const", "continue", "default", "defer", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "fn", "for", "from", "func", "function", "go", "if", "implements", "import", "in", "interface", "let", "match", "mod", "new", "package", "private", "protected", "pub", "public", "return", "select", "static", "struct", "super", "switch", "this", "throw", "trait", "true", "try", "type", "typeof", "undefined", "use", "var", "void", "while", "with", "yield"
-])
-
-const languageKeywords = {
-  "C": ["auto", "char", "double", "extern", "float", "inline", "int", "long", "register", "restrict", "short", "signed", "sizeof", "typedef", "union", "unsigned", "volatile"],
-  "C++": ["alignas", "alignof", "constexpr", "decltype", "friend", "mutable", "namespace", "noexcept", "operator", "template", "typename", "using", "virtual"],
-  "C#": ["base", "checked", "decimal", "delegate", "event", "explicit", "implicit", "internal", "is", "lock", "namespace", "object", "out", "override", "params", "readonly", "ref", "sealed", "stackalloc", "string"],
-  "Go": ["chan", "const", "fallthrough", "func", "go", "goto", "interface", "map", "package", "range", "select", "struct", "type"],
-  "Java": ["boolean", "byte", "char", "double", "final", "float", "int", "long", "native", "short", "strictfp", "synchronized", "throws", "transient", "volatile"],
-  "Kotlin": ["actual", "annotation", "companion", "crossinline", "data", "expect", "external", "infix", "inline", "inner", "lateinit", "noinline", "object", "open", "operator", "out", "reified", "sealed", "suspend", "tailrec", "vararg"],
-  "Python": ["and", "assert", "async", "await", "def", "del", "elif", "except", "global", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "None"],
-  "React JSX": ["const", "let", "var", "function", "return", "import", "export", "from", "async", "await", "class", "extends", "new", "this", "typeof", "instanceof"],
-  "React TSX": ["const", "let", "var", "function", "return", "import", "export", "from", "async", "await", "class", "extends", "new", "this", "typeof", "instanceof", "interface", "type", "keyof", "readonly", "namespace", "declare"],
-  "Ruby": ["alias", "begin", "defined?", "elsif", "end", "ensure", "module", "next", "redo", "rescue", "retry", "self", "then", "unless", "until", "when"],
-  "Rust": ["as", "async", "await", "const", "crate", "dyn", "extern", "impl", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "self", "Self", "static", "struct", "trait", "unsafe", "use", "where"],
-  "Scala": ["def", "extends", "given", "implicit", "lazy", "match", "object", "override", "sealed", "using", "val", "var"],
-  "TypeScript": ["const", "let", "var", "function", "return", "import", "export", "from", "async", "await", "class", "extends", "new", "this", "typeof", "instanceof", "interface", "type", "keyof", "readonly", "namespace", "declare"],
-  "JavaScript": ["const", "let", "var", "function", "return", "import", "export", "from", "async", "await", "class", "extends", "new", "this", "typeof", "instanceof"]
-}
-
-const hashCommentLanguages = new Set(["Python", "Ruby", "Shell", "PowerShell", "YAML", "TOML", "Makefile"])
-const markupLanguages = new Set(["HTML", "XML", "Vue", "Svelte"])
-const cssLanguages = new Set(["CSS", "SCSS", "Sass", "Less"])
-const constantWords = new Set(["true", "false", "null", "nil", "None", "undefined", "NaN", "Infinity"])
-
-const mergeToken = (tokens, type, value) => {
-  if (!value) return
-  const previous = tokens[tokens.length - 1]
-  if (previous?.type === type) previous.value += value
-  else tokens.push({ type, value })
-}
-
-const isIdentifierStart = char => /[A-Za-z_$]/.test(char || "")
-const isIdentifierPart = char => /[A-Za-z0-9_$]/.test(char || "")
-const isDigit = char => /[0-9]/.test(char || "")
-
-const nextNonSpace = (text, start) => {
-  let index = start
-  while (index < text.length && /\s/.test(text[index])) index += 1
-  return text[index] || ""
-}
-
-const codeTokens = (text, language) => {
-  const tokens = []
-  const keywords = new Set([...commonKeywords, ...(languageKeywords[language] || [])])
-  const hashComments = hashCommentLanguages.has(language)
-  let index = 0
-
-  while (index < text.length) {
-    const char = text[index]
-    const next = text[index + 1]
-
-    if (/\s/.test(char)) {
-      let end = index + 1
-      while (end < text.length && /\s/.test(text[end])) end += 1
-      mergeToken(tokens, "plain", text.slice(index, end))
-      index = end
-      continue
-    }
-
-    if (hashComments && char === "#") {
-      const end = text.indexOf("\n", index)
-      mergeToken(tokens, "comment", text.slice(index, end < 0 ? text.length : end))
-      index = end < 0 ? text.length : end
-      continue
-    }
-
-    if (!hashComments && char === "/" && next === "/") {
-      const end = text.indexOf("\n", index)
-      mergeToken(tokens, "comment", text.slice(index, end < 0 ? text.length : end))
-      index = end < 0 ? text.length : end
-      continue
-    }
-
-    if (char === "/" && next === "*") {
-      const end = text.indexOf("*/", index + 2)
-      const finish = end < 0 ? text.length : end + 2
-      mergeToken(tokens, "comment", text.slice(index, finish))
-      index = finish
-      continue
-    }
-
-    if (char === '"' || char === "'" || char === "`") {
-      const quote = char
-      const triple = quote !== "`" && text.slice(index, index + 3) === quote.repeat(3)
-      let end = index + (triple ? 3 : 1)
-      while (end < text.length) {
-        if (text[end] === "\\") {
-          end += 2
-          continue
-        }
-        if (triple && text.slice(end, end + 3) === quote.repeat(3)) {
-          end += 3
-          break
-        }
-        if (!triple && text[end] === quote) {
-          end += 1
-          break
-        }
-        end += 1
-      }
-      mergeToken(tokens, "string", text.slice(index, end))
-      index = end
-      continue
-    }
-
-    if (isDigit(char) || (char === "." && isDigit(next))) {
-      let end = index + 1
-      while (end < text.length && /[0-9A-Fa-f_xXobOB.eE+-]/.test(text[end])) end += 1
-      mergeToken(tokens, "number", text.slice(index, end))
-      index = end
-      continue
-    }
-
-    if (char === "@" && isIdentifierStart(next)) {
-      let end = index + 2
-      while (end < text.length && isIdentifierPart(text[end])) end += 1
-      mergeToken(tokens, "annotation", text.slice(index, end))
-      index = end
-      continue
-    }
-
-    if (isIdentifierStart(char)) {
-      let end = index + 1
-      while (end < text.length && isIdentifierPart(text[end])) end += 1
-      const word = text.slice(index, end)
-      if (constantWords.has(word)) mergeToken(tokens, "constant", word)
-      else if (keywords.has(word)) mergeToken(tokens, "keyword", word)
-      else if (/^[A-Z][A-Za-z0-9_$]*$/.test(word)) mergeToken(tokens, "type", word)
-      else if (nextNonSpace(text, end) === "(") mergeToken(tokens, "function", word)
-      else mergeToken(tokens, "plain", word)
-      index = end
-      continue
-    }
-
-    if (/[+\-*=<>!&|%^~?:]/.test(char)) {
-      let end = index + 1
-      while (end < text.length && /[+\-*=<>!&|%^~?:]/.test(text[end])) end += 1
-      mergeToken(tokens, "operator", text.slice(index, end))
-      index = end
-      continue
-    }
-
-    if (/[{}()[\],.;]/.test(char)) mergeToken(tokens, "punctuation", char)
-    else mergeToken(tokens, "plain", char)
-    index += 1
-  }
-
-  return tokens
-}
-
-const markupTokens = text => {
-  const tokens = []
-  let index = 0
-  while (index < text.length) {
-    if (text.startsWith("<!--", index)) {
-      const end = text.indexOf("-->", index + 4)
-      const finish = end < 0 ? text.length : end + 3
-      mergeToken(tokens, "comment", text.slice(index, finish))
-      index = finish
-      continue
-    }
-    if (text[index] !== "<") {
-      const end = text.indexOf("<", index)
-      mergeToken(tokens, "plain", text.slice(index, end < 0 ? text.length : end))
-      index = end < 0 ? text.length : end
-      continue
-    }
-    const end = text.indexOf(">", index + 1)
-    const finish = end < 0 ? text.length : end + 1
-    const tag = text.slice(index, finish)
-    const parts = tag.match(/(<\/?|\/?>|=|\s+|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_:][-A-Za-z0-9_:.]*|.)/g) || [tag]
-    let nameSeen = false
-    for (const part of parts) {
-      if (/^<\/?$|^\/?>$|^=$/.test(part)) mergeToken(tokens, "punctuation", part)
-      else if (/^\s+$/.test(part)) mergeToken(tokens, "plain", part)
-      else if (/^["']/.test(part)) mergeToken(tokens, "string", part)
-      else if (!nameSeen && /^[A-Za-z_:]/.test(part)) {
-        mergeToken(tokens, "tag", part)
-        nameSeen = true
-      } else if (/^[A-Za-z_:]/.test(part)) mergeToken(tokens, "attribute", part)
-      else mergeToken(tokens, "plain", part)
-    }
-    index = finish
-  }
-  return tokens
-}
-
-const cssTokens = text => {
-  const base = codeTokens(text, "CSS")
-  return base.map(token => {
-    if (token.type !== "plain") return token
-    if (/^#[A-Fa-f0-9]{3,8}$/.test(token.value)) return { ...token, type: "number" }
-    return token
-  })
-}
-
-const markdownTokens = text => {
-  const tokens = []
-  const lines = text.split(/(?<=\n)/)
-  let fenced = false
-  for (const line of lines) {
-    if (/^\s*```/.test(line)) {
-      mergeToken(tokens, "keyword", line)
-      fenced = !fenced
-      continue
-    }
-    if (fenced) {
-      mergeToken(tokens, "string", line)
-      continue
-    }
-    if (/^\s{0,3}#{1,6}\s/.test(line)) {
-      mergeToken(tokens, "heading", line)
-      continue
-    }
-    if (/^\s*>/.test(line)) {
-      mergeToken(tokens, "comment", line)
-      continue
-    }
-    const parts = line.split(/(`[^`]*`|\[[^\]]+\]\([^\)]+\)|\*\*[^*]+\*\*|__[^_]+__)/g)
-    for (const part of parts) {
-      if (/^`/.test(part)) mergeToken(tokens, "string", part)
-      else if (/^\[/.test(part)) mergeToken(tokens, "link", part)
-      else if (/^(\*\*|__)/.test(part)) mergeToken(tokens, "keyword", part)
-      else mergeToken(tokens, "plain", part)
-    }
-  }
-  return tokens
-}
-
-const jsonTokens = text => {
-  const tokens = codeTokens(text, "JSON")
-  return tokens.map((token, index) => {
-    if (token.type !== "string") return token
-    const tail = tokens.slice(index + 1).find(item => item.value.trim())
-    return tail?.value.trim().startsWith(":") ? { ...token, type: "attribute" } : token
-  })
-}
-
-const tokenize = (text, language) => {
-  if (text.length > MAX_HIGHLIGHT_CHARS) return [{ type: "plain", value: text }]
-  if (markupLanguages.has(language)) return markupTokens(text)
-  if (cssLanguages.has(language)) return cssTokens(text)
-  if (language === "Markdown" || language === "MDX") return markdownTokens(text)
-  if (language === "JSON") return jsonTokens(text)
-  return codeTokens(text, language)
-}
-
-export default function SyntaxEditor({ value, language, path, onChange, onSave, onCursorChange, onNavigate, revealLine = null, fontSize = 14, searchRequest = null }) {
-  const [findRequest, setFindRequest] = useState(null)
-  const highlightRef = useRef(null)
-  const lineRef = useRef(null)
+export default function SyntaxEditor({ value, language, path, onChange, onSave, onCursorChange, onNavigate, revealLine = null, fontSize = 14, searchRequest = null, initialSnapshot = null, onSnapshot, diagnostics = [], actionRequest = null, onEditorContextMenu }) {
   const textareaRef = useRef(null)
-  const [completionOpen, setCompletionOpen] = useState(false)
-  const [completionItems, setCompletionItems] = useState([])
-  const [completionIndex, setCompletionIndex] = useState(0)
-  const [completionAnchor, setCompletionAnchor] = useState({ top: 22, left: 10 })
-  const [navigationModifier, setNavigationModifier] = useState(false)
-  const tokens = useMemo(() => tokenize(String(value || ""), language), [language, value])
-  const lineNumbers = useMemo(() => Array.from({ length: Math.max(1, String(value || "").split("\n").length) }, (_, index) => index + 1).join("\n"), [value])
+  const editorRef = useRef(null)
+  const callbacksRef = useRef(null)
+  const valueRef = useRef(value)
+  const snapshotRef = useRef(initialSnapshot)
+  const externallyUpdating = useRef(false)
+  const marksRef = useRef([])
+  const diagnosticMarksRef = useRef([])
+  const actionCallbacksRef = useRef(null)
+  const [engineState, setEngineState] = useState("loading")
+  const [engineError, setEngineError] = useState("")
+  const [loadAttempt, setLoadAttempt] = useState(0)
+  const [findRequest, setFindRequest] = useState(null)
+  const [searchState, setSearchState] = useState(null)
+  callbacksRef.current = { onChange, onSave, onCursorChange, onNavigate, onSnapshot }
+  actionCallbacksRef.current = onEditorContextMenu
+  valueRef.current = value
 
-  const syncLayers = textarea => {
-    if (!textarea) return
-    if (highlightRef.current) {
-      highlightRef.current.scrollTop = textarea.scrollTop
-      highlightRef.current.scrollLeft = textarea.scrollLeft
-    }
-    if (lineRef.current) lineRef.current.scrollTop = textarea.scrollTop
-  }
+  const updateCursor = useCallback(() => {
+    const editor = editorRef.current
+    if (!editor) return
+    const position = editor.getCursor()
+    callbacksRef.current.onCursorChange?.({ line: position.line + 1, column: position.ch + 1, offset: editor.indexFromPos(position) })
+  }, [])
 
-  const syncScroll = event => {
-    syncLayers(event.currentTarget)
-    if (completionOpen) setCompletionOpen(false)
-  }
+  const showFind = useCallback(replace => {
+    const editor = editorRef.current
+    const selection = editor?.getSelection() || ""
+    editor?.closeHint?.()
+    setFindRequest(current => ({ replace: Boolean(replace), query: selection && !selection.includes("\n") && selection.length <= 300 ? selection : current?.query || "", startOffset: editor ? editor.indexFromPos(editor.getCursor()) : 0, nonce: Date.now() }))
+  }, [])
 
-  const updateCursor = event => {
-    const textarea = event.currentTarget
-    if (!textarea) return
-    const before = textarea.value.slice(0, textarea.selectionStart)
-    const line = before.split("\n").length
-    const lastBreak = before.lastIndexOf("\n")
-    const column = textarea.selectionStart - lastBreak
-    onCursorChange?.({ line, column, offset: textarea.selectionStart })
-  }
-
-  const openCompletions = (textarea, content = value) => {
-    const offset = textarea.selectionStart
-    const items = getCompletions({ content, language, offset, limit: 10 })
-    if (!items.length) {
-      setCompletionOpen(false)
-      return
-    }
-    const before = content.slice(0, offset)
-    const line = before.split("\n").length
-    const lastBreak = before.lastIndexOf("\n")
-    const column = offset - lastBreak
-    const lineHeight = fontSize * 1.55
-    const charWidth = fontSize * 0.62
-    const maxTop = Math.max(80, textarea.clientHeight - 190)
-    const maxLeft = Math.max(160, textarea.clientWidth - 310)
-    const top = Math.max(8, Math.min(maxTop, (line - 1) * lineHeight - textarea.scrollTop + lineHeight + 8))
-    const left = Math.max(8, Math.min(maxLeft, (column - 1) * charWidth - textarea.scrollLeft + 14))
-    setCompletionItems(items)
-    setCompletionIndex(0)
-    setCompletionAnchor({ top, left })
-    setCompletionOpen(true)
-  }
-
-  const applyCompletion = item => {
-    const textarea = textareaRef.current
-    if (!textarea || !item) return
-    const start = textarea.selectionStart
-    const end = textarea.selectionEnd
-    const prefix = wordPrefixAt(value, start)
-    const replaceStart = Math.max(0, start - prefix.length)
-    const next = `${value.slice(0, replaceStart)}${item.label}${value.slice(end)}`
-    onChange(next)
-    setCompletionOpen(false)
-    window.requestAnimationFrame(() => {
-      const position = replaceStart + item.label.length
-      textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(position, position)
-      updateCursor({ currentTarget: textareaRef.current })
+  const showCompletions = useCallback(manual => {
+    const editor = editorRef.current
+    if (!editor || editor.somethingSelected()) return
+    const position = editor.getCursor()
+    const offset = editor.indexFromPos(position)
+    const content = editor.getValue()
+    const prefix = wordPrefixAt(content, offset)
+    if (!manual && prefix.length < 2) return
+    const tokenType = editor.getTokenTypeAt(position) || ""
+    if (/comment|string/.test(tokenType)) return
+    const items = getCompletions({ content, language, offset, limit: 35 })
+    if (!items.length) return
+    const from = editor.posFromIndex(offset - prefix.length)
+    const to = editor.posFromIndex(offset)
+    editor.showHint({
+      hint: () => ({
+        list: items.map(item => ({ text: item.label, displayText: item.label, className: `ide-hint-${item.kind}` })),
+        from,
+        to
+      }),
+      completeSingle: false,
+      alignWithWord: true,
+      closeOnUnfocus: true,
+      container: document.body
     })
+  }, [language])
+
+  useEffect(() => {
+    let cancelled = false
+    let cleanup = () => {}
+    setEngineState("loading")
+    setEngineError("")
+    loadIdeEditorEngine().then(CodeMirror => {
+      if (cancelled || !textareaRef.current) return
+      const textarea = textareaRef.current
+      textarea.value = valueRef.current
+      const editor = CodeMirror.fromTextArea(textarea, {
+        mode: editorModeForLanguage(language),
+        theme: "default",
+        lineNumbers: true,
+        firstLineNumber: 1,
+        lineWrapping: false,
+        indentUnit: 2,
+        tabSize: 2,
+        indentWithTabs: false,
+        smartIndent: true,
+        electricChars: true,
+        autoCloseBrackets: true,
+        autoCloseTags: true,
+        matchBrackets: true,
+        styleActiveLine: true,
+        foldGutter: true,
+        gutters: ["CodeMirror-linenumbers", "ide-diagnostics-gutter", "CodeMirror-foldgutter"],
+        cursorScrollMargin: 50,
+        undoDepth: 350,
+        historyEventDelay: 450,
+        viewportMargin: 15,
+        autofocus: false,
+        extraKeys: {
+          "Tab": cm => cm.somethingSelected() ? cm.indentSelection("add") : cm.replaceSelection("  ", "end", "+input"),
+          "Shift-Tab": "indentLess",
+          "Ctrl-S": () => callbacksRef.current.onSave?.(),
+          "Cmd-S": () => callbacksRef.current.onSave?.(),
+          "Ctrl-F": () => showFind(false),
+          "Cmd-F": () => showFind(false),
+          "Ctrl-H": () => showFind(true),
+          "Cmd-Alt-F": () => showFind(true),
+          "Ctrl-Space": () => showCompletions(true),
+          "Cmd-Space": () => showCompletions(true),
+          "Ctrl-D": "selectNextOccurrence",
+          "Cmd-D": "selectNextOccurrence",
+          "Ctrl-L": "selectLine",
+          "Cmd-L": "selectLine",
+          "Shift-Ctrl-K": "deleteLine",
+          "Shift-Cmd-K": "deleteLine",
+          "Ctrl-/": "toggleCommentIndented",
+          "Cmd-/": "toggleCommentIndented",
+          "Alt-Up": "swapLineUp",
+          "Alt-Down": "swapLineDown",
+          "Shift-Ctrl-D": "duplicateLine",
+          "Shift-Cmd-D": "duplicateLine",
+          "Ctrl-Enter": "insertLineAfter",
+          "Cmd-Enter": "insertLineAfter"
+        }
+      })
+      editorRef.current = editor
+      const wrapper = editor.getWrapperElement()
+      wrapper.setAttribute("aria-label", `Editor ${path}`)
+      editor.getInputField().setAttribute("aria-label", `Código: ${path}`)
+      editor.getInputField().setAttribute("aria-multiline", "true")
+      wrapper.classList.add("ide-codemirror")
+      wrapper.style.fontSize = `${fontSize}px`
+      if (snapshotRef.current?.content === valueRef.current) {
+        try {
+          editor.setHistory(snapshotRef.current.history)
+          if (snapshotRef.current.cursor) editor.setCursor(snapshotRef.current.cursor)
+        } catch {
+          editor.clearHistory()
+        }
+      }
+      const onEditorChange = instance => {
+        if (!externallyUpdating.current) callbacksRef.current.onChange?.(instance.getValue())
+      }
+      let hintTimer = null
+      const onInputRead = (instance, change) => {
+        window.clearTimeout(hintTimer)
+        if (change.origin !== "+input" || !change.text?.length || !/^[\p{L}\p{N}_$]$/u.test(change.text[change.text.length - 1])) return
+        hintTimer = window.setTimeout(() => showCompletions(false), 130)
+      }
+      const onControlClick = event => {
+        if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || !event.target.closest(".CodeMirror-lines")) return
+        const position = editor.coordsChar({ left: event.clientX, top: event.clientY }, "window")
+        const offset = editor.indexFromPos(position)
+        event.preventDefault()
+        event.stopPropagation()
+        callbacksRef.current.onNavigate?.({ offset, mode: "smart" })
+      }
+      const onModifierDown = event => {
+        if (event.ctrlKey || event.metaKey) wrapper.classList.add("ide-navigation-modifier")
+      }
+      const onModifierUp = event => {
+        if (!event.ctrlKey && !event.metaKey) wrapper.classList.remove("ide-navigation-modifier")
+      }
+      const onWindowBlur = () => wrapper.classList.remove("ide-navigation-modifier")
+      editor.on("change", onEditorChange)
+      editor.on("cursorActivity", updateCursor)
+      editor.on("inputRead", onInputRead)
+      wrapper.addEventListener("mousedown", onControlClick, true)
+      wrapper.addEventListener("keydown", onModifierDown)
+      window.addEventListener("keyup", onModifierUp)
+      window.addEventListener("blur", onWindowBlur)
+      const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => editor.refresh()) : null
+      resizeObserver?.observe(wrapper.parentElement)
+      window.requestAnimationFrame(() => {
+        if (editorRef.current !== editor) return
+        editor.refresh()
+        if (snapshotRef.current?.content === valueRef.current && Number.isFinite(snapshotRef.current.scrollTop)) editor.scrollTo(snapshotRef.current.scrollLeft || 0, snapshotRef.current.scrollTop)
+        updateCursor()
+      })
+      setEngineState("ready")
+      cleanup = () => {
+        window.clearTimeout(hintTimer)
+        resizeObserver?.disconnect()
+        const scroll = editor.getScrollInfo()
+        callbacksRef.current.onSnapshot?.({ content: editor.getValue(), history: editor.getHistory(), cursor: editor.getCursor(), scrollTop: scroll.top, scrollLeft: scroll.left })
+        editor.closeHint?.()
+        editor.off("change", onEditorChange)
+        editor.off("cursorActivity", updateCursor)
+        editor.off("inputRead", onInputRead)
+        wrapper.removeEventListener("mousedown", onControlClick, true)
+        wrapper.removeEventListener("keydown", onModifierDown)
+        window.removeEventListener("keyup", onModifierUp)
+        window.removeEventListener("blur", onWindowBlur)
+        editor.toTextArea()
+        editorRef.current = null
+      }
+    }).catch(error => {
+      if (cancelled) return
+      setEngineError(error.message || String(error))
+      setEngineState("error")
+    })
+    return () => { cancelled = true; cleanup() }
+  }, [language, loadAttempt, path, showFind, showCompletions, updateCursor])
+
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor || !actionRequest?.nonce || (actionRequest.path && actionRequest.path !== path)) return
+    const commands = {
+      duplicate: "duplicateLine",
+      delete: "deleteLine",
+      comment: "toggleCommentIndented",
+      selectAll: "selectAll",
+      undo: "undo",
+      redo: "redo"
+    }
+    if (commands[actionRequest.action]) editor.execCommand(commands[actionRequest.action])
+    if (actionRequest.action === "cut") editor.replaceSelection("", "around", "+delete")
+    if (actionRequest.action === "paste") editor.replaceSelection(actionRequest.text || "", "around", "+input")
+    editor.focus()
+    updateCursor()
+  }, [actionRequest?.nonce, path, engineState, updateCursor])
+
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor) return undefined
+    for (const mark of diagnosticMarksRef.current) mark.clear()
+    diagnosticMarksRef.current = []
+    editor.clearGutter("ide-diagnostics-gutter")
+    editor.operation(() => {
+      for (const item of diagnostics.slice(0, 120)) {
+        const line = Math.max(0, Math.min(editor.lastLine(), Number(item.line || 1) - 1))
+        const text = editor.getLine(line) || ""
+        const column = Math.max(0, Math.min(text.length ? text.length - 1 : 0, Number(item.column || 1) - 1))
+        const marker = document.createElement("span")
+        marker.className = `ide-diagnostic-marker severity-${item.severity === "warning" ? "warning" : "error"}`
+        marker.textContent = "●"
+        marker.title = item.message
+        marker.setAttribute("aria-label", item.message)
+        editor.setGutterMarker(line, "ide-diagnostics-gutter", marker)
+        if (text.length) diagnosticMarksRef.current.push(editor.markText({ line, ch: column }, { line, ch: Math.min(text.length, column + 1) }, { className: `ide-diagnostic-underline severity-${item.severity === "warning" ? "warning" : "error"}`, title: item.message }))
+      }
+    })
+    return () => { for (const mark of diagnosticMarksRef.current) mark.clear(); diagnosticMarksRef.current = []; editor.clearGutter("ide-diagnostics-gutter") }
+  }, [diagnostics, engineState, path])
+
+  const onContextMenu = event => {
+    if (event.target.closest(".ide-find-bar, input:not(.CodeMirror-input)") && !event.target.closest(".CodeMirror")) return
+    const editor = editorRef.current
+    if (!editor || !actionCallbacksRef.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    const position = editor.coordsChar({ left: event.clientX, top: event.clientY }, "window")
+    actionCallbacksRef.current({ x: event.clientX, y: event.clientY, offset: editor.indexFromPos(position), selection: editor.getSelection(), path })
   }
 
-  const handleChange = event => {
-    const textarea = event.currentTarget
-    const nextValue = textarea.value
-    onChange(nextValue)
-    if (completionOpen) window.requestAnimationFrame(() => openCompletions(textarea, nextValue))
-  }
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor || editor.getValue() === value) return
+    const selection = editor.listSelections().map(item => ({ anchor: editor.indexFromPos(item.anchor), head: editor.indexFromPos(item.head) }))
+    const scroll = editor.getScrollInfo()
+    externallyUpdating.current = true
+    editor.setValue(value)
+    editor.setSelections(selection.map(item => ({ anchor: editor.posFromIndex(Math.min(item.anchor, value.length)), head: editor.posFromIndex(Math.min(item.head, value.length)) })))
+    editor.scrollTo(scroll.left, scroll.top)
+    externallyUpdating.current = false
+    updateCursor()
+  }, [value, engineState, updateCursor])
+
+  useEffect(() => {
+    const editor = editorRef.current
+    if (editor) {
+      editor.getWrapperElement().style.fontSize = `${fontSize}px`
+      editor.refresh()
+    }
+  }, [fontSize, engineState])
+
+  useEffect(() => {
+    if (engineState !== "ready" || !searchRequest?.nonce || (searchRequest.path && searchRequest.path !== path)) return
+    showFind(searchRequest.replace)
+  }, [searchRequest?.nonce, engineState, showFind])
+
+  useEffect(() => {
+    if (engineState !== "ready" || !revealLine?.line || revealLine.path !== path) return
+    const editor = editorRef.current
+    if (!editor) return
+    const line = Math.max(0, Math.min(editor.lastLine(), Number(revealLine.line) - 1))
+    const ch = Math.max(0, Math.min(editor.getLine(line).length, Number(revealLine.column || 1) - 1))
+    const start = { line, ch }
+    const end = editor.posFromIndex(Math.min(editor.getValue().length, editor.indexFromPos(start) + (revealLine.length || 0)))
+    editor.setSelection(start, end)
+    editor.scrollIntoView({ from: start, to: end }, 90)
+    editor.focus()
+    updateCursor()
+  }, [engineState, path, revealLine?.nonce, updateCursor])
+
+  useEffect(() => {
+    const editor = editorRef.current
+    for (const mark of marksRef.current) mark.clear()
+    marksRef.current = []
+    if (!editor || !findRequest || !searchState?.matches?.length) return
+    const matches = searchState.matches
+    const active = Math.max(0, Math.min(searchState.index, matches.length - 1))
+    const indices = matches.length <= MAX_VISIBLE_MATCHES
+      ? matches.map((_, index) => index)
+      : Array.from({ length: MAX_VISIBLE_MATCHES }, (_, index) => index + Math.max(0, Math.min(active - 100, matches.length - MAX_VISIBLE_MATCHES)))
+    editor.operation(() => {
+      for (const index of indices) {
+        const match = matches[index]
+        marksRef.current.push(editor.markText(editor.posFromIndex(match.start), editor.posFromIndex(match.end), { className: index === active ? "ide-cm-search-current" : "ide-cm-search-match", clearOnEnter: false }))
+      }
+    })
+    return () => { for (const mark of marksRef.current) mark.clear(); marksRef.current = [] }
+  }, [findRequest, searchState, value, engineState])
 
   const selectRange = (start, end, focus = true) => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-    if (focus) textarea.focus()
-    textarea.setSelectionRange(start, end)
-    const before = textarea.value.slice(0, start)
-    const line = before.split("\n").length
-    const column = start - before.lastIndexOf("\n")
-    const lineHeight = fontSize * 1.55
-    textarea.scrollTop = Math.max(0, (line - 4) * lineHeight)
-    textarea.scrollLeft = Math.max(0, (column - 1) * fontSize * 0.62 - textarea.clientWidth / 2)
-    syncLayers(textarea)
-    updateCursor({ currentTarget: textarea })
+    const editor = editorRef.current
+    if (!editor) return
+    const from = editor.posFromIndex(start)
+    const to = editor.posFromIndex(end)
+    editor.setSelection(from, to, { scroll: false })
+    editor.scrollIntoView({ from, to }, 80)
+    if (focus) editor.focus()
+    updateCursor()
   }
 
   const replaceRange = (start, end, replacement) => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-    const previousFocus = document.activeElement
-    textarea.focus()
-    textarea.setSelectionRange(start, end)
-    const inserted = document.execCommand("insertText", false, replacement)
-    if (!inserted) onChange(`${value.slice(0, start)}${replacement}${value.slice(end)}`)
-    window.requestAnimationFrame(() => {
-      syncLayers(textarea)
-      updateCursor({ currentTarget: textarea })
-      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true })
-    })
+    const editor = editorRef.current
+    if (!editor) return
+    const from = editor.posFromIndex(start)
+    const to = editor.posFromIndex(end)
+    editor.replaceRange(replacement, from, to, "+input")
+    const cursor = editor.posFromIndex(start + replacement.length)
+    editor.setCursor(cursor)
+    editor.scrollIntoView(cursor, 80)
+    updateCursor()
   }
 
-  const showFind = (replace = false) => {
-    const textarea = textareaRef.current
-    const selection = textarea ? value.slice(textarea.selectionStart, textarea.selectionEnd) : ""
-    setCompletionOpen(false)
-    setFindRequest(current => ({ replace, query: selection && !selection.includes("\n") ? selection : current?.query || "", nonce: Date.now() }))
-  }
-
-  useEffect(() => {
-    if (searchRequest) showFind(searchRequest.replace)
-  }, [searchRequest?.nonce])
-
-  const handleKeyDown = event => {
-    if (event.key === "Control" || event.key === "Meta") setNavigationModifier(true)
-    if (event.isComposing || event.nativeEvent?.isComposing) return
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && ["f", "h"].includes(event.key.toLowerCase())) {
-      event.preventDefault()
-      showFind(event.key.toLowerCase() === "h")
-      return
-    }
-    if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
-      event.preventDefault()
-      openCompletions(event.currentTarget)
-      return
-    }
-    if (completionOpen && event.key === "ArrowDown") {
-      event.preventDefault()
-      setCompletionIndex(current => Math.min(current + 1, completionItems.length - 1))
-      return
-    }
-    if (completionOpen && event.key === "ArrowUp") {
-      event.preventDefault()
-      setCompletionIndex(current => Math.max(0, current - 1))
-      return
-    }
-    if (completionOpen && (event.key === "Enter" || event.key === "Tab")) {
-      event.preventDefault()
-      applyCompletion(completionItems[completionIndex])
-      return
-    }
-    if (completionOpen && event.key === "Escape") {
-      event.preventDefault()
-      setCompletionOpen(false)
-      return
-    }
-    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "s") {
-      event.preventDefault()
-      onSave?.()
-      return
-    }
-    if (event.key === "Tab") {
-      event.preventDefault()
-      const textarea = event.currentTarget
-      const start = textarea.selectionStart
-      const end = textarea.selectionEnd
-      const next = `${value.slice(0, start)}  ${value.slice(end)}`
-      onChange(next)
-      window.requestAnimationFrame(() => {
-        textareaRef.current?.focus()
-        textareaRef.current?.setSelectionRange(start + 2, start + 2)
-        updateCursor({ currentTarget: textareaRef.current })
-      })
-    }
-  }
-
-  const handleClick = event => {
-    updateCursor(event)
-    setCompletionOpen(false)
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) onNavigate?.({ offset: event.currentTarget.selectionStart, mode: "smart" })
-  }
-
-  const handleKeyUp = event => {
-    if (event.key === "Control" || event.key === "Meta") setNavigationModifier(false)
-    updateCursor(event)
-  }
-
-  useEffect(() => {
-    if (!revealLine?.line || revealLine.path !== path) return
-    const textarea = textareaRef.current
-    if (!textarea) return
-    const lines = value.split("\n")
-    const targetLine = Math.min(lines.length, Math.max(1, Number(revealLine.line) || 1))
-    let offset = 0
-    for (let index = 0; index < targetLine - 1; index += 1) offset += lines[index].length + 1
-    offset += Math.min(lines[targetLine - 1].length, Math.max(0, Number(revealLine.column || 1) - 1))
-    selectRange(offset, Math.min(value.length, offset + (revealLine.length || 0)))
-  }, [fontSize, path, revealLine?.nonce])
-
-  return (
-    <div className="ide-editor-surface">
-      {findRequest ? <EditorFindBar value={value} request={findRequest} onSelect={selectRange} onReplace={replaceRange} onClose={() => { setFindRequest(null); textareaRef.current?.focus() }} /> : null}
-    <div className="ide-syntax-shell">
-      <pre ref={lineRef} className="ide-syntax-lines" aria-hidden="true">{lineNumbers}</pre>
-      <div className="ide-syntax-editor">
-        <pre ref={highlightRef} className="ide-syntax-highlight" aria-hidden="true">{tokens.map((token, index) => token.type === "plain" ? <React.Fragment key={index}>{token.value}</React.Fragment> : <span key={index} className={`syntax-${token.type}`}>{token.value}</span>)}</pre>
-        <textarea ref={textareaRef} className={navigationModifier ? "navigation-modifier" : ""} value={value} onChange={handleChange} onKeyDown={handleKeyDown} onScroll={syncScroll} onClick={handleClick} onKeyUp={handleKeyUp} onBlur={() => setNavigationModifier(false)} onSelect={updateCursor} spellCheck="false" wrap="off" aria-label={`Editor ${path}`} />
-        {completionOpen ? <div className="ide-completion-popup" style={completionAnchor}>
-          <header><span>Local Intelligence</span><kbd>Ctrl+Space</kbd></header>
-          {completionItems.map((item, index) => <button type="button" key={`${item.kind}:${item.label}`} className={index === completionIndex ? "active" : ""} onMouseDown={event => { event.preventDefault(); applyCompletion(item) }}><i>{item.kind === "keyword" ? "K" : "S"}</i><strong>{item.label}</strong><small>{item.kind}</small></button>)}
-        </div> : null}
-      </div>
+  return <div className="ide-editor-surface" onContextMenuCapture={onContextMenu}>
+    {findRequest && engineState === "ready" ? <EditorFindBar value={value} request={findRequest} onSelect={selectRange} onReplace={replaceRange} onClose={() => { setFindRequest(null); setSearchState(null); editorRef.current?.focus() }} onMatchesChange={setSearchState} /> : null}
+    <div className="ide-codemirror-container">
+      <textarea ref={textareaRef} defaultValue={value} aria-label={`Editor ${path}`} className="ide-codemirror-source" />
+      {engineState === "loading" ? <div className="ide-editor-loading" role="status">Iniciando editor de código…</div> : null}
+      {engineState === "error" ? <div className="ide-editor-loading error" role="alert"><strong>O editor não pôde ser carregado.</strong><span>{engineError}</span><button type="button" onClick={() => setLoadAttempt(current => current + 1)}>Tentar novamente</button></div> : null}
     </div>
-    </div>
-  )
+  </div>
 }

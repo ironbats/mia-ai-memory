@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { createTerminalController, MAX_TERMINAL_TABS } from "../../lib/terminalController.js"
 import { runBrowserCommand } from "../../lib/browserTerminal.js"
+import TerminalAnsiOutput from "./TerminalAnsiOutput.jsx"
 
 export default function IdeTerminal({ workspace, analysis, visible }) {
   const controllers = useRef(new Map())
@@ -38,7 +39,7 @@ export default function IdeTerminal({ workspace, analysis, visible }) {
     if (!visible) return
     const output = outputRef.current
     if (followOutput.current && output) output.scrollTop = output.scrollHeight
-    else setUnread(true)
+    else if (visible && active?.entries?.length) setUnread(true)
   }, [active?.entries, visible])
 
   const transitioning = Boolean(workspace.projectSwitching || !workspace.isReady)
@@ -90,31 +91,30 @@ export default function IdeTerminal({ workspace, analysis, visible }) {
         <button onClick={() => controller.close(active.id)} disabled={active.busy} aria-label="Fechar terminal" title={active.busy ? 'Pare o processo antes de fechar o terminal' : 'Fechar terminal · Ctrl+W'}>×</button>
       </div>
     </div>
-    <div className="ide-terminal-mode" title={workspace.terminalRuntimeAvailable ? 'Cada comando abre um processo. Sem entrada interativa/PTY; cwd compartilhado entre as abas deste projeto. Comandos usam as permissões do usuário do host.' : 'Comandos locais limitados: help lista as opções. Nenhum shell do sistema.'}>
+    <div className="ide-terminal-mode" title={workspace.terminalRuntimeAvailable ? `Modo de compatibilidade: ${workspace.terminalPtyReason || "shell interativo indisponível"}. Para habilitar o terminal completo, execute npm ci --include=optional em services/workspace-runtime e reinicie o runtime.` : 'Comandos locais limitados: help lista as opções. Nenhum shell do sistema.'}>
       <i /><strong>{workspace.terminalRuntimeAvailable ? 'HOST RW · comandos' : 'Browser · limitado'}</strong>
-      <span>{workspace.terminalRuntimeAvailable ? 'Sem shell interativo · diretório compartilhado entre abas' : 'help para comandos disponíveis'}</span>
+      <span>{workspace.terminalRuntimeAvailable ? 'Modo compatibilidade · shell interativo depende do node-pty' : 'help para comandos disponíveis'}</span>
       <small role="status">{active.status}</small>
     </div>
     <div id={`console-${scope}`} role="tabpanel" aria-labelledby={`tab-${scope}-${active.id}`} className="ide-terminal-content">
-      <div ref={outputRef} className={`ide-terminal-output${wrap ? '' : ' no-wrap'}`} tabIndex={0} aria-label="Saída do terminal" onScroll={event => {
+      <div ref={outputRef} className={`ide-terminal-output${wrap ? '' : ' no-wrap'}`} tabIndex={0} aria-label="Saída do terminal" onMouseDown={event => { if (event.target === event.currentTarget && event.button === 0) inputRef.current?.focus() }} onScroll={event => {
         const node = event.currentTarget
         const follow = node.scrollHeight - node.scrollTop - node.clientHeight < 24
         followOutput.current = follow
         scrollPositions.current.set(`${scope}:${state.activeId}`, { top: node.scrollTop, follow })
         if (follow) setUnread(false)
       }}>
-        {!active.entries.length ? <div className="ide-terminal-welcome">{workspace.terminalRuntimeAvailable ? 'Execute comandos no projeto físico. Use outra aba para um segundo processo.' : 'Terminal do navegador. Digite help para começar.'}</div> : null}
-        <pre>{active.entries.map((entry, index) => <span key={index} className={`terminal-${entry.type}`}>{entry.text}</span>)}</pre>
+        <TerminalAnsiOutput entries={active.entries} />
+        <form className="ide-terminal-input" onSubmit={event => { event.preventDefault(); if (!transitioning) controller.run(active.id, adapter) }}>
+          <span title={`${workspace.rootName || 'workspace'}/${state.cwd}`}>{workspace.rootName || 'workspace'}{state.cwd ? `/${state.cwd}` : ''}<i> $</i></span>
+          <input ref={inputRef} aria-label="Comando do terminal" value={active.input} readOnly={active.busy || transitioning} onChange={event => controller.input(active.id, event.target.value)} onKeyDown={event => {
+            if (event.isComposing || active.busy || event.ctrlKey || event.metaKey || event.altKey) return
+            if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); controller.history(active.id, event.key === 'ArrowUp' ? -1 : 1) }
+          }} spellCheck={false} autoComplete="off" autoCapitalize="off" placeholder={active.busy ? 'Processo em execução · Ctrl+C para parar' : ''} />
+          <button type="submit" disabled={transitioning || active.busy || !active.input.trim()} aria-label="Executar comando" title="Executar · Enter">↵</button>
+        </form>
       </div>
       {unread ? <button className="ide-terminal-follow" onClick={() => { followOutput.current = true; outputRef.current.scrollTop = outputRef.current.scrollHeight; setUnread(false) }}>Ir para saída recente ↓</button> : null}
     </div>
-    <form className="ide-terminal-input" onSubmit={event => { event.preventDefault(); if (!transitioning) controller.run(active.id, adapter) }}>
-      <span title={`${workspace.rootName || 'workspace'}/${state.cwd}`}>{workspace.rootName || 'workspace'}{state.cwd ? `/${state.cwd}` : ''}<i> $</i></span>
-      <input ref={inputRef} aria-label="Comando do terminal" value={active.input} readOnly={active.busy || transitioning} onChange={event => controller.input(active.id, event.target.value)} onKeyDown={event => {
-        if (event.isComposing || active.busy || event.ctrlKey || event.metaKey || event.altKey) return
-        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); controller.history(active.id, event.key === 'ArrowUp' ? -1 : 1) }
-      }} spellCheck={false} autoComplete="off" autoCapitalize="off" placeholder={active.busy ? 'Processo em execução · Ctrl+C para parar' : workspace.terminalRuntimeAvailable ? 'git status, npm run dev…' : 'help'} />
-      <button type="submit" disabled={transitioning || active.busy || !active.input.trim()} aria-label="Executar comando" title="Executar · Enter">↵</button>
-    </form>
   </div>
 }

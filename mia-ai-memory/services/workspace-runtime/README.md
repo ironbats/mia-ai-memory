@@ -109,3 +109,42 @@ a real native TTY (ANSI, persistent cwd/environment, dimensions, Ctrl+C and
 shutdown). Native integration is explicitly skipped if node-pty is unavailable;
 the missing-native fallback is tested separately. Linux is exercised in this
 change; macOS/Windows native behavior still needs platform validation.
+
+## ANSI and Git colors in the non-interactive terminal (v2.0.0.19)
+
+The existing authenticated `/terminal/commands` and `/terminal/sessions/:id` endpoints retain their schemas. Non-PTY subprocesses continue to use isolated pipes, shared workspace cwd and the existing stop/poll lifecycle. The runtime now streams and preserves only SGR color formatting codes; all other terminal control sequences are filtered across chunk boundaries. The agent-facing terminal context continues to strip ANSI formatting.
+
+Direct `git status`, `git diff`, `git show` and `git log` commands receive temporary per-process Git color configuration; user/repository Git configuration files are unchanged and commands with explicit output redirection are unaffected. Git determines the red/green color from the real index/working tree. The browser renders color codes as safe React text nodes, not HTML. To run interactive commands or keep per-tab shell state, install the optional native `node-pty` dependency and use the PTY mode instead.
+
+## Editor diagnostics (v2.0.0.18)
+
+`POST /api/v1/runtime/workspaces/:workspaceId/diagnostics` accepts
+`{ "path": "src/Example.java", "content": "..." }` and returns
+`{ "status": "ok|issues|unavailable|timeout|failed|cancelled", "language": "...", "provider": "...", "diagnostics": [{ "severity": "error", "line": 1, "column": 1, "message": "..." }] }`.
+It checks **the unsaved editor buffer**; it never invokes a project build or writes
+source files to the workspace. Requests require the same workspace pairing token
+and origin policy used for file and terminal APIs. Limits: 256 KiB of UTF-8 source,
+three concurrent checks, up to 80 findings, bounded output and a timeout (7s,
+12s for Java). Temporary files are always removed from the system temp folder.
+Canceled HTTP requests stop the active check. No user-provided shell command,
+executable or arguments are accepted.
+
+| Extension | Checker | Install on the machine running the runtime |
+| --- | --- | --- |
+| `.js`, `.mjs`, `.cjs` | Node.js syntax (`--check`), module-aware | Included with runtime |
+| `.jsx`, `.ts`, `.tsx`, `.mts`, `.cts` | TypeScript parser diagnostics | `tsc` on PATH |
+| `.java` | JDK Compiler API parse-only | `java` (JDK 11+) on PATH |
+| `.py`, `.xml`, `.toml` | Python standard-library parsers | `python3` on PATH; TOML requires Python 3.11+ |
+| `.go` | `gofmt -e` syntax parser | `gofmt` on PATH |
+| `.rs` | `rustfmt --emit stdout` | `rustfmt` on PATH |
+| `.sh`, `.bash` | Bash syntax (`-n`) | `bash` on PATH |
+| `.rb` | Ruby syntax (`-c`) | `ruby` on PATH |
+| `.php` | PHP syntax (`-l`) | `php` on PATH |
+| `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hh` | Clang syntax-only | `clang` on PATH |
+| `.json` | Built-in `JSON.parse` | Included with runtime |
+
+The checker runs **syntax validation**, not full project compilation, linking,
+classpath/module resolution, type checking or LSP diagnostics. Unavailable tools,
+unsupported extensions (including dialect-specific SQL, YAML and JSONC), runtime
+timeouts and failures are explicitly marked as unverified, never as clean.
+Project builds remain available through the existing HOST RW terminal.

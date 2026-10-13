@@ -278,6 +278,14 @@ export const workspaceRuntime = {
     })
     return body
   },
+  async diagnose(workspaceId, path, content, options = {}) {
+    return request(`/api/v1/runtime/workspaces/${encodeURIComponent(workspaceId)}/diagnostics`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, content }),
+      signal: options.signal
+    })
+  },
   async terminalContext(workspaceId, maxChars = 131072) {
     const value = Math.max(8192, Math.min(262144, Number(maxChars) || 131072))
     return request(`/api/v1/runtime/workspaces/${encodeURIComponent(workspaceId)}/terminal/context?maxChars=${encodeURIComponent(value)}`)

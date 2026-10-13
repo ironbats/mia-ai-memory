@@ -7,14 +7,18 @@ import crypto from "node:crypto"
 import { execFile, spawn, spawnSync } from "node:child_process"
 import { URL } from "node:url"
 import { appendTerminalOutput, createTerminalOutput, readTerminalOutput } from "./terminal-output.js"
+import { createTerminalColorFilter, terminalCommandEnvironment } from "./terminal-colors.js"
 import { createPtyManager, PTY_JSON_MAX_BYTES, PTY_POLL_MAX_MS, terminalCursor } from "./pty-manager.js"
 import { terminatePty } from "./pty-native.js"
+import { diagnoseSource, DIAGNOSTIC_SOURCE_LIMIT } from "./diagnostics.js"
 
 const HOST = process.env.AI_MEMORY_WORKSPACE_RUNTIME_HOST || "127.0.0.1"
 const PORT = Number.parseInt(process.env.AI_MEMORY_WORKSPACE_RUNTIME_PORT || "8791", 10)
 const MAX_JSON_BYTES = 1024 * 1024
 const MAX_WRITE_BYTES = 16 * 1024 * 1024
 const MAX_TERMINAL_SESSIONS = 80
+const MAX_DIAGNOSTIC_JOBS = 3
+let runningDiagnosticJobs = 0
 const TERMINAL_STOP_GRACE_MS = 1000
 const RUNTIME_DIR = path.join(os.homedir(), ".ai-memory")
 const REGISTRY_FILE = process.env.AI_MEMORY_WORKSPACE_RUNTIME_REGISTRY || path.join(RUNTIME_DIR, "workspace-runtime.json")
@@ -378,7 +382,7 @@ const startTerminalCommand = async (workspace, command) => {
   const args = process.platform === "win32" ? ["-NoProfile", "-Command", normalized] : ["-lc", normalized]
   const child = spawn(shell, args, {
     cwd: currentCwd,
-    env: { ...process.env, TERM: process.env.TERM || "xterm-256color", FORCE_COLOR: "0" },
+    env: terminalCommandEnvironment(normalized),
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32"
   })
@@ -397,14 +401,13 @@ const startTerminalCommand = async (workspace, command) => {
     stopTimer: null,
     child
   }
-  const append = chunk => {
-    appendTerminalOutput(session, stripAnsi(chunk))
-  }
-  // Each pipe needs its own decoder so split UTF-8 characters survive chunks.
+  const stdoutFilter = createTerminalColorFilter()
+  const stderrFilter = createTerminalColorFilter()
+  const append = text => { if (text) appendTerminalOutput(session, text) }
   child.stdout.setEncoding("utf8")
   child.stderr.setEncoding("utf8")
-  child.stdout.on("data", append)
-  child.stderr.on("data", append)
+  child.stdout.on("data", chunk => append(stdoutFilter(chunk)))
+  child.stderr.on("data", chunk => append(stderrFilter(chunk)))
   child.on("error", error => append(`${error.message || error}\n`))
   child.on("close", (code, signal) => {
     clearTimeout(session.stopTimer)
@@ -581,6 +584,26 @@ const server = http.createServer(async (req, res) => {
       terminalCwds.delete(workspace.id)
       await persistRegistry()
       return sendJson(req, res, 200, { removed: true })
+    }
+    if (req.method === "POST" && suffix === "/diagnostics") {
+      if (runningDiagnosticJobs >= MAX_DIAGNOSTIC_JOBS) throw failure("diagnostic workers busy", 429, "DIAGNOSTICS_BUSY")
+      const body = await readJson(req)
+      const filePath = normalizeRelative(body.path)
+      if (!filePath || typeof body.content !== "string" || Buffer.byteLength(body.content, "utf8") > DIAGNOSTIC_SOURCE_LIMIT) {
+        throw failure("invalid file or content too large (max 256 KiB)", 413, "DIAGNOSTIC_INVALID_INPUT")
+      }
+      const controller = new AbortController()
+      const disconnected = () => controller.abort()
+      res.once("close", disconnected)
+      runningDiagnosticJobs += 1
+      try {
+        const result = await diagnoseSource({ filePath, content: body.content, signal: controller.signal })
+        if (!res.destroyed) return sendJson(req, res, 200, result)
+        return
+      } finally {
+        runningDiagnosticJobs -= 1
+        res.off("close", disconnected)
+      }
     }
     if (req.method === "GET" && suffix === "/git/status") return sendJson(req, res, 200, { git: gitInfo(workspace) })
     if (req.method === "GET" && suffix === "/stat") {

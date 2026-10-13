@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/terminal-output.js && node --check src/pty-manager.js && node --check src/pty-native.js",
+    "check": "node --check src/index.js && node --check src/diagnostics.js && node --check src/terminal-output.js && node --check src/terminal-colors.js && node --check src/pty-manager.js && node --check src/pty-native.js",
     "test": "node --test"
   },
   "optionalDependencies": {

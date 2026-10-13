@@ -5,7 +5,7 @@ import IdeTerminal from "./ide/IdeTerminal.jsx"
 
 const severityIcon = severity => severity === "error" ? "×" : severity === "warning" ? "!" : "i"
 
-export default function IdeWorkbenchPanel({ activePanel, onPanelChange, onClose, workspace, analysis, onRevealLine, resizeHandle, maximized = false, onToggleMaximize }) {
+export default function IdeWorkbenchPanel({ activePanel, onPanelChange, onClose, workspace, analysis, onRevealLine, onCheck, resizeHandle, maximized = false, onToggleMaximize }) {
   const [selectedChangePath, setSelectedChangePath] = useState("")
   const sessionChanges = workspace.sessionChanges || []
   const gitChanges = workspace.gitWorkingChanges || []
@@ -42,8 +42,12 @@ export default function IdeWorkbenchPanel({ activePanel, onPanelChange, onClose,
 
       {activePanel === "problems" ? (
         <div className="ide-problems-panel">
-          {analysis.diagnostics.map((item, index) => <button key={`${item.line}:${item.message}:${index}`} className={`severity-${item.severity}`} onClick={() => onRevealLine(item.line)}><i>{severityIcon(item.severity)}</i><span><strong>{item.message}</strong><small>Ln {item.line} · {workspace.activeTab?.name || "arquivo ativo"}</small></span></button>)}
-          {!analysis.diagnostics.length ? <div className="ide-panel-empty"><span>✓</span><strong>Nenhum problema local detectado</strong><small>{workspace.activeTab ? "Validação estrutural e conflitos estão limpos no arquivo ativo." : "Abra um arquivo para executar a análise local de problemas."}</small></div> : null}
+          <div className="ide-problems-header" role="status">
+            <div><strong>{["ok", "issues"].includes(analysis.diagnosticStatus) ? `Analisador: ${analysis.diagnosticProvider}` : analysis.diagnosticStatus === "checking" ? "Verificando sintaxe…" : "Verificação limitada"}</strong><small>{analysis.diagnosticMessage || (["ok", "issues"].includes(analysis.diagnosticStatus) ? "Análise isolada do conteúdo atual, sem substituir o build completo do projeto." : analysis.diagnosticStatus === "local" ? "Somente análise estrutural no navegador. Conecte um projeto HOST RW para usar compiladores locais." : analysis.diagnosticStatus === "checking" ? "Consultando a ferramenta instalada no Workspace Runtime." : "Abra um arquivo e conecte o Workspace Runtime para verificar sintaxe.")}</small></div>
+            <button onClick={onCheck} disabled={!workspace.activeTab || analysis.diagnosticStatus === "checking"} title="Reexecutar diagnóstico do arquivo ativo">↻ Verificar</button>
+          </div>
+          {analysis.diagnostics.map((item, index) => <button key={`${item.line}:${item.column || 1}:${item.message}:${index}`} className={`severity-${item.severity}`} onClick={() => onRevealLine(item.line, item.column || 1)}><i>{severityIcon(item.severity)}</i><span><strong>{item.message}</strong><small>Ln {item.line}, Col {item.column || 1} · {workspace.activeTab?.name || "arquivo ativo"}</small></span></button>)}
+          {!analysis.diagnostics.length ? <div className="ide-panel-empty"><span>{["ok", "issues"].includes(analysis.diagnosticStatus) ? "✓" : "?"}</span><strong>{["ok", "issues"].includes(analysis.diagnosticStatus) ? "Nenhum erro de sintaxe identificado" : analysis.diagnosticStatus === "checking" ? "Analisando arquivo…" : "Nenhum problema estrutural encontrado"}</strong><small>{["ok", "issues"].includes(analysis.diagnosticStatus) ? `Verificado com ${analysis.diagnosticProvider}. Um build completo pode identificar outros erros.` : "Isso não confirma que o arquivo compila; consulte o status do analisador acima."}</small></div> : null}
         </div>
       ) : null}
 
