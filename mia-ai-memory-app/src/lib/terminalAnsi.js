@@ -143,3 +143,91 @@ export function colorizeGitStatusOutput(text) {
   }
   return segments
 }
+
+
+export function isGitCommitCommand(command) {
+  const value = String(command ?? '').trim()
+  return /^git(?:(?:\s+--no-pager)|(?:\s+-C\s+(?:"[^"]+"|'[^']+'|\S+))|(?:\s+-c\s+\S+))*\s+commit(?=\s|$)/.test(value)
+}
+
+const gitCommitHeader = /^\[[^\]\r\n]+\s[0-9a-f]{4,64}\]\s+\S/i
+const gitCommitSummary = /^(\s*\d+\s+(?:files?\s+changed|arquivos?\s+(?:alterados?|modificados?)))(.*)$/i
+const gitCommitCount = /\d[\d,.]*\s+(?:insertions?\(\+\)|deletions?\(-\)|inser[cç][oõ]es?\(\+\)|exclus[oõ]es?\(-\))/gi
+
+export function colorizeGitCommitOutput(text) {
+  const value = String(text ?? '')
+  const lines = value.match(/[^\n]*\n|[^\n]+$/g) || []
+  const segments = []
+  const append = (part, foreground = null, bold = false) => {
+    if (!part) return
+    const previous = segments.at(-1)
+    if (previous?.foreground === foreground && previous?.bold === bold) previous.text += part
+    else segments.push({ text: part, foreground, background: null, bold })
+  }
+  if (!lines.some(line => gitCommitHeader.test(line))) {
+    append(value)
+    return segments
+  }
+  for (const line of lines) {
+    if (gitCommitHeader.test(line)) {
+      append(line, 'green', true)
+      continue
+    }
+    if (/^\s*(?:create mode|rewrite|rename|copy|mode change)\s+/i.test(line)) {
+      append(line, 'green')
+      continue
+    }
+    if (/^\s*delete mode\s+/i.test(line)) {
+      append(line, 'red')
+      continue
+    }
+    const summary = gitCommitSummary.exec(line.replace(/\r?\n$/, ''))
+    if (!summary) {
+      append(line)
+      continue
+    }
+    append(summary[1], 'green')
+    const remainder = line.slice(summary[1].length)
+    let cursor = 0
+    for (const match of remainder.matchAll(gitCommitCount)) {
+      append(remainder.slice(cursor, match.index))
+      append(match[0], /(?:deletions?|exclus[oõ]es?)\(-\)/i.test(match[0]) ? 'red' : 'green')
+      cursor = match.index + match[0].length
+    }
+    append(remainder.slice(cursor))
+  }
+  return segments
+}
+
+export function mergeTerminalColorSegments(nativeSegments, fallbackSegments) {
+  const result = []
+  let nativeIndex = 0
+  let fallbackIndex = 0
+  let nativeOffset = 0
+  let fallbackOffset = 0
+  while (nativeIndex < nativeSegments.length && fallbackIndex < fallbackSegments.length) {
+    const native = nativeSegments[nativeIndex]
+    const fallback = fallbackSegments[fallbackIndex]
+    const length = Math.min(native.text.length - nativeOffset, fallback.text.length - fallbackOffset)
+    if (length > 0) {
+      const text = native.text.slice(nativeOffset, nativeOffset + length)
+      const foreground = native.foreground ?? fallback.foreground
+      const background = native.background ?? fallback.background
+      const bold = native.bold || fallback.bold
+      const previous = result.at(-1)
+      if (previous?.foreground === foreground && previous?.background === background && previous?.bold === bold) previous.text += text
+      else result.push({ text, foreground, background, bold })
+    }
+    nativeOffset += length
+    fallbackOffset += length
+    if (nativeOffset === native.text.length) {
+      nativeIndex += 1
+      nativeOffset = 0
+    }
+    if (fallbackOffset === fallback.text.length) {
+      fallbackIndex += 1
+      fallbackOffset = 0
+    }
+  }
+  return result
+}
